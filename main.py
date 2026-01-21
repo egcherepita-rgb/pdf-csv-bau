@@ -15,7 +15,7 @@ except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.7.0")
+app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.8.0")
 
 # -------------------------
 # Regex
@@ -64,47 +64,79 @@ def strip_dims_anywhere(name: str) -> str:
 
 
 # -------------------------
-# Артикулы (Art.xlsx)
+# ID/Артикулы (Art1.xlsx)
 # -------------------------
-def load_article_map() -> Tuple[Dict[str, str], str]:
+def load_article_map() -> Tuple[Dict[str, str], str, str]:
+    """
+    Возвращает:
+      - map: normalized товар -> значение выбранной колонки (по умолчанию "Кастомный ID")
+      - status: строка статуса
+      - used_column: имя столбца, откуда взяли значение
+    """
     if openpyxl is None:
-        return {}, "openpyxl_not_installed"
+        return {}, "openpyxl_not_installed", ""
 
-    path = os.getenv("ART_XLSX_PATH", "Art.xlsx")
+    # Для БауЦентра по умолчанию Art1.xlsx
+    path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
     if not os.path.exists(path):
-        return {}, f"file_not_found:{path}"
+        return {}, f"file_not_found:{path}", ""
+
+    # Какой столбец брать как "Артикул" в итоговом CSV
+    # (по умолчанию берём "Кастомный ID", но можно переопределить)
+    desired_value_col = normalize_space(os.getenv("ART_VALUE_COLUMN", "Кастомный ID"))
 
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb[wb.sheetnames[0]]
     except Exception as e:
-        return {}, f"cannot_open:{e}"
+        return {}, f"cannot_open:{e}", ""
 
     header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
-    товар_col = 1
-    арт_col = 2
+
+    # ищем колонки по названиям
+    товар_col = None
+    value_col = None
+
     for idx, h in enumerate(header, start=1):
-        if h.lower() == "товар":
+        hl = h.lower()
+        if hl == "товар":
             товар_col = idx
-        if h.lower() == "артикул":
-            арт_col = idx
+        if h == desired_value_col:
+            value_col = idx
+
+    # fallback-логика, если вдруг заголовок отличается/не найден:
+    if товар_col is None:
+        товар_col = 1  # как раньше
+
+    if value_col is None:
+        # пробуем "Артикул", если "Кастомный ID" не найден
+        for idx, h in enumerate(header, start=1):
+            if h.lower() == "артикул":
+                value_col = idx
+                desired_value_col = "Артикул"
+                break
+
+    if value_col is None:
+        return {}, f"bad_header:no колонка '{desired_value_col}' (и fallback 'Артикул')", ""
 
     m: Dict[str, str] = {}
     for r in range(2, ws.max_row + 1):
         товар = ws.cell(r, товар_col).value
-        арт = ws.cell(r, арт_col).value
-        if not товар or not арт:
+        val = ws.cell(r, value_col).value
+        if not товар or val is None:
             continue
+
         товар_s = normalize_space(str(товар))
-        арт_s = normalize_space(str(арт))
-        if not товар_s or not арт_s:
+        val_s = normalize_space(str(val))
+        if not товар_s or not val_s:
             continue
-        m[normalize_key(товар_s)] = арт_s
 
-    return m, "ok"
+        m[normalize_key(товар_s)] = val_s
+
+    return m, "ok", desired_value_col
 
 
-ARTICLE_MAP, ARTICLE_MAP_STATUS = load_article_map()
+ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN = load_article_map()
 
 CATEGORY_VALUE = 2
 
@@ -138,20 +170,13 @@ def increment_counter() -> int:
 def get_counter() -> int:
     return _read_counter()
 
-# Картинка-инструкция (положи рядом с main.py)
+# Видео-инструкция (положи рядом с main.py)
 INSTRUCTION_VIDEO_PATH = os.getenv("INSTRUCTION_VIDEO_PATH", "instruction.mp4")
 
 
 # -------------------------
 # PDF parsing helpers
 # -------------------------
-def split_lines(page: fitz.Page) -> List[str]:
-    # Оставлено для совместимости (сейчас в parse_items мы не используем split_lines для скорости)
-    txt = page.get_text("text") or ""
-    lines = [normalize_space(x) for x in txt.splitlines()]
-    return [x for x in lines if x]
-
-
 def is_noise(line: str) -> bool:
     low = (line or "").strip().lower()
     if not low:
@@ -181,7 +206,6 @@ def is_totals_block(line: str) -> bool:
 
 
 def money_to_number(line: str) -> int:
-    # "40 347 ₽" -> 40347
     s = normalize_space(line).replace("₽", "").strip()
     s = s.replace("\u00a0", " ")
     s = s.replace(" ", "")
@@ -193,20 +217,11 @@ def money_to_number(line: str) -> int:
 
 
 def is_project_total_only(line: str, prev_line: str = "") -> bool:
-    """
-    Не путать цену позиции (например "450 ₽") с итогом проекта (например "40 347 ₽").
-
-    Правила:
-    1) Если предыдущая строка содержит "стоимость проекта" — считаем следующую сумму итогом.
-    2) Если строка выглядит как "NNN ₽" и сумма >= 10 000 — считаем итогом.
-    """
     if not RX_MONEY_LINE.fullmatch(normalize_space(line)):
         return False
-
     prev = normalize_space(prev_line).lower()
     if "стоимость проекта" in prev:
         return True
-
     v = money_to_number(line)
     return v >= 10000
 
@@ -233,15 +248,10 @@ def looks_like_money_or_qty(line: str) -> bool:
 
 
 def clean_name_from_buffer(buf: List[str]) -> str:
-    """
-    Буфер накапливает строки до якоря (цена/кол-во/сумма).
-    Чистим от мусора, заголовков, размеров, веса и т.п.
-    """
     filtered = []
     for ln in buf:
         if is_noise(ln) or is_header_token(ln) or is_totals_block(ln):
             continue
-        # Тут prev_line неизвестен — поэтому is_project_total_only не используем в фильтре буфера.
         filtered.append(ln)
 
     while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
@@ -255,14 +265,9 @@ def clean_name_from_buffer(buf: List[str]) -> str:
 
 
 # -------------------------
-# Main parser (объединённая логика)
+# Main parser
 # -------------------------
 def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
-    """
-    Поддерживает ДВА якоря (оба будут работать в одном PDF):
-    A) В одной строке: "450 ₽ 2 900 ₽" (price ₽ qty sum ₽)
-    B) В разных строках: price ₽ -> qty -> sum ₽
-    """
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
     ordered = OrderedDict()
@@ -275,12 +280,12 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
         "anchors_multiline": 0,
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
+        "article_value_column": ARTICLE_VALUE_COLUMN,
     }
 
     for page in doc:
         stats["pages"] += 1
 
-        # ---- УСКОРЕНИЕ: достаём текст ОДИН раз и быстро пропускаем страницы без ₽
         txt = page.get_text("text") or ""
         if "₽" not in txt:
             continue
@@ -289,9 +294,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
         lines = [x for x in lines if x]
         if not lines:
             continue
-        # ---- конец блока ускорения
 
-        # ВАЖНО: итоги (totals) считаем ЛОКАЛЬНО для страницы
         in_totals = False
         buf.clear()
 
@@ -314,7 +317,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # A) INLINE anchor: "... 450 ₽ 1 450 ₽"
+            # A) INLINE anchor
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
@@ -334,9 +337,8 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # B) MULTILINE anchor: money -> qty -> money
+            # B) MULTILINE anchor
             if RX_MONEY_LINE.fullmatch(line):
-                # УСКОРЕНИЕ: было i+12, делаем i+8 (обычно хватает)
                 end = min(len(lines), i + 8)
 
                 qty_idx = None
@@ -394,11 +396,12 @@ def make_csv_excel_friendly(rows: List[Tuple[str, int]]) -> bytes:
         lineterminator="\r\n",
     )
 
+    # ВНИМАНИЕ: колонка называется "Артикул", но значение будет из "Кастомный ID" (по умолчанию)
     writer.writerow(["Артикул", "Наименование", "Всего", "Категория"])
 
     for name, qty in rows:
-        art = ARTICLE_MAP.get(normalize_key(name), "")
-        writer.writerow([art, name, qty, CATEGORY_VALUE])
+        custom_id = ARTICLE_MAP.get(normalize_key(name), "")
+        writer.writerow([custom_id, name, qty, CATEGORY_VALUE])
 
     return out.getvalue().encode("utf-8-sig")  # UTF-8 BOM
 
@@ -439,7 +442,6 @@ HOME_HTML = """<!doctype html>
     .thumb { margin-top: 10px; border: 1px solid var(--border); border-radius: 14px; overflow:hidden;
              background: rgba(255,255,255,.02); cursor: zoom-in; }
     .thumb video { display:block; width:100%; height:auto; max-height: 260px; object-fit: cover; object-position: top; }
-    /* modal */
     .modal { position: fixed; inset: 0; background: rgba(0,0,0,.75); display:none; align-items:center; justify-content:center; padding: 18px; }
     .modal.open { display:flex; }
     .modalcard { width:min(1200px, 100%); background: rgba(18,26,42,.96); border: 1px solid var(--border);
@@ -530,7 +532,6 @@ HOME_HTML = """<!doctype html>
     modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 
-    // show video help if file exists
     fetch('/instruction.mp4', { method: 'HEAD' }).then(r => {
       if (r.ok) {
         help.style.display = 'block';
@@ -607,9 +608,11 @@ def health():
         "status": "ok",
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
+        "article_value_column": ARTICLE_VALUE_COLUMN,
         "category_value": CATEGORY_VALUE,
         "instruction_video_exists": os.path.exists(INSTRUCTION_VIDEO_PATH),
         "conversions": get_counter(),
+        "art_xlsx_path": os.getenv("ART_XLSX_PATH", "Art1.xlsx"),
     }
 
 
