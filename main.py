@@ -52,18 +52,9 @@ def normalize_space(s: str) -> str:
 def normalize_key(name: str) -> str:
     s = normalize_space(name).lower()
     s = s.replace("×", "x").replace("х", "x")
-
-    # Убираем размеры вроде "30x10 мм"
     s = RX_DIMS_ANYWHERE.sub(" ", s)
-
-    # Убираем бренд/служебные вставки, чтобы совпадали строки из PDF и Excel
-    # (в PDF часто нет "ПРАКТИК Home", а в справочнике есть)
-    s = re.sub(r"\bpraktik\s*home\b", " ", s, flags=re.IGNORECASE)
-    s = re.sub(r"\bпрактик\s*home\b", " ", s, flags=re.IGNORECASE)
-
     s = normalize_space(s)
     return s
-
 
 
 def strip_dims_anywhere(name: str) -> str:
@@ -136,17 +127,8 @@ def load_article_map() -> Tuple[Dict[str, str], str, str]:
             continue
 
         товар_s = normalize_space(str(товар))
-        if not товар_s:
-            continue
-
-        # Excel может отдать число как float/int — нормализуем
-        if isinstance(val, float) and val.is_integer():
-            val_s = str(int(val))
-        else:
-            val_s = normalize_space(str(val))
-
-        # 0 / пусто считаем "нет значения"
-        if not val_s or val_s in {"0", "0.0"}:
+        val_s = normalize_space(str(val))
+        if not товар_s or not val_s:
             continue
 
         m[normalize_key(товар_s)] = val_s
@@ -415,11 +397,11 @@ def make_csv_excel_friendly(rows: List[Tuple[str, int]]) -> bytes:
     )
 
     # ВНИМАНИЕ: колонка называется "Артикул", но значение будет из "Кастомный ID" (по умолчанию)
-    writer.writerow(["Артикул", "Наименование", "Всего", "Категория"])
+    writer.writerow(["Артикул", "Наименование", "Всего"])
 
     for name, qty in rows:
         custom_id = ARTICLE_MAP.get(normalize_key(name), "")
-        writer.writerow([custom_id, name, qty, CATEGORY_VALUE])
+        writer.writerow([custom_id, name, qty])
 
     return out.getvalue().encode("utf-8-sig")  # UTF-8 BOM
 
