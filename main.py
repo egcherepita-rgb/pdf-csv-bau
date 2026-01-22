@@ -397,11 +397,11 @@ def make_csv_excel_friendly(rows: List[Tuple[str, int]]) -> bytes:
     )
 
     # ВНИМАНИЕ: колонка называется "Артикул", но значение будет из "Кастомный ID" (по умолчанию)
-    writer.writerow(["Артикул", "Наименование", "Всего", "Категория"])
+    writer.writerow(["Артикул", "Наименование", "Всего"])
 
     for name, qty in rows:
         custom_id = ARTICLE_MAP.get(normalize_key(name), "")
-        writer.writerow([custom_id, name, qty, CATEGORY_VALUE])
+        writer.writerow([custom_id, name, qty])
 
     return out.getvalue().encode("utf-8-sig")  # UTF-8 BOM
 
