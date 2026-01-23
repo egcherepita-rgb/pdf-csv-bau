@@ -8,6 +8,7 @@ from typing import List, Tuple, Dict
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 try:
     import openpyxl  # requires openpyxl in requirements.txt
@@ -16,6 +17,14 @@ except Exception:
 
 
 app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.8.0")
+
+# -------------------------
+# Static files (logo, etc.)
+# -------------------------
+STATIC_DIR = os.getenv("STATIC_DIR", "static")
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
 
 # -------------------------
 # Regex
@@ -409,6 +418,9 @@ def make_csv_excel_friendly(rows: List[Tuple[str, int]]) -> bytes:
 # -------------------------
 # UI (миниатюра + открыть полностью)
 # -------------------------
+# -------------------------
+# UI (Logo + clean page)
+# -------------------------
 HOME_HTML = """<!doctype html>
 <html lang="ru">
 <head>
@@ -416,128 +428,162 @@ HOME_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>PDF → CSV</title>
   <style>
-    :root { --bg:#0b0f17; --card:#121a2a; --text:#e9eefc; --muted:#a8b3d6; --border:rgba(255,255,255,.08); --btn:#4f7cff; }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-           background: radial-gradient(1200px 600px at 20% 10%, #18234a 0%, var(--bg) 55%); color: var(--text); }
-    .wrap { min-height: 100vh; display:flex; align-items:center; justify-content:center; padding: 28px; }
-    .card { width:min(900px, 100%); background: rgba(18,26,42,.92); border: 1px solid var(--border);
-            border-radius: 18px; padding: 22px; box-shadow: 0 18px 60px rgba(0,0,0,.45); }
-    .top { display:flex; gap:14px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
-    h1 { margin:0; font-size: 28px; letter-spacing: .2px; }
-    .hint { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
-    .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--border); padding: 6px 10px; border-radius: 999px; }
-    .row { margin-top: 18px; display:flex; gap: 12px; align-items:center; flex-wrap:wrap; }
-    .file { display:flex; align-items:center; gap:10px; padding: 10px 12px; border: 1px dashed var(--border);
-            border-radius: 14px; background: rgba(255,255,255,.02); }
-    button { padding: 10px 14px; border: 0; border-radius: 14px; cursor: pointer; font-weight: 800;
-             background: var(--btn); color: #0b1020; }
-    button:disabled { opacity: .55; cursor:not-allowed; }
-    .status { margin-top: 14px; font-size: 14px; color: var(--muted); white-space: pre-wrap; }
-    .status.ok { color: #79ffa8; }
-    .status.err { color: #ff7b8a; }
-    .help { margin-top: 16px; }
-    .helphead { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
-    .helptitle { font-weight: 700; color: var(--text); }
-    .openfull { font-size: 13px; color: var(--muted); text-decoration: underline; cursor: pointer; }
-    .thumb { margin-top: 10px; border: 1px solid var(--border); border-radius: 14px; overflow:hidden;
-             background: rgba(255,255,255,.02); cursor: zoom-in; }
-    .thumb video { display:block; width:100%; height:auto; max-height: 260px; object-fit: cover; object-position: top; }
-    .modal { position: fixed; inset: 0; background: rgba(0,0,0,.75); display:none; align-items:center; justify-content:center; padding: 18px; }
-    .modal.open { display:flex; }
-    .modalcard { width:min(1200px, 100%); background: rgba(18,26,42,.96); border: 1px solid var(--border);
-                 border-radius: 18px; overflow:hidden; box-shadow: 0 30px 100px rgba(0,0,0,.6); }
-    .modalbar { display:flex; align-items:center; justify-content:space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); }
-    .modalbar .t { color: var(--text); font-weight: 700; font-size: 14px; }
-    .close { background: transparent; color: var(--muted); border: 1px solid var(--border);
-             border-radius: 12px; padding: 8px 10px; cursor:pointer; font-weight: 700; }
-    .modalbody { background: #0b0f17; }
-    .modalbody video { display:block; width:100%; height:auto; }
-    .corner { position: fixed; right: 12px; bottom: 10px; font-size: 12px; color: var(--muted); opacity: .9; }
+    :root{
+      --bg:#071426;
+      --card:#ffffff;
+      --text:#13274b;
+      --muted:#6c7a90;
+      --dash:#d0d9e8;
+      --btn:#1e5fd8;
+      --btn2:#184fb4;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 50% 20%, #1d4a8a 0%, var(--bg) 60%);
+      color: var(--text);
+    }
+    .wrap{
+      min-height:100vh;
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      justify-content:center;
+      gap:22px;
+      padding:32px;
+    }
+    .logo{
+      width:260px;
+      max-width:70vw;
+      height:auto;
+      filter: drop-shadow(0 14px 28px rgba(0,0,0,.28));
+    }
+    .card{
+      width:min(760px, 100%);
+      background: var(--card);
+      border-radius: 22px;
+      padding: 36px;
+      box-shadow: 0 25px 70px rgba(0,0,0,.45);
+      text-align:center;
+    }
+    h1{
+      margin:0 0 18px;
+      font-size: 34px;
+      letter-spacing:.2px;
+      color: var(--text);
+    }
+    .drop{
+      margin: 18px 0 26px;
+      border: 2px dashed var(--dash);
+      border-radius: 18px;
+      padding: 34px 22px;
+      background: #fbfcff;
+    }
+    .drop p{
+      margin:0 0 16px;
+      color: var(--muted);
+      font-size: 16px;
+      line-height:1.35;
+    }
+    .pick-btn{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:10px;
+      background: var(--btn);
+      color: white;
+      padding: 14px 26px;
+      border-radius: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      user-select:none;
+      box-shadow: 0 10px 25px rgba(30,95,216,.25);
+    }
+    .pick-btn:hover{ background: var(--btn2); }
+    input[type=file]{ display:none; }
+
+    .main-btn{
+      width:100%;
+      border: none;
+      background: linear-gradient(180deg, #2b74ff, #1c56c7);
+      color: white;
+      padding: 18px;
+      border-radius: 14px;
+      font-size: 20px;
+      font-weight: 900;
+      cursor: pointer;
+      box-shadow: 0 16px 35px rgba(30,95,216,.28);
+    }
+    .main-btn:disabled{
+      opacity: .55;
+      cursor: not-allowed;
+      box-shadow:none;
+    }
+    .status{
+      margin-top: 14px;
+      min-height: 22px;
+      font-size: 14px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .status.ok{ color: #108a44; }
+    .status.err{ color: #c2283a; }
+
+    .counter{
+      position: fixed;
+      right: 18px;
+      bottom: 16px;
+      color: #b8c6df;
+      font-size: 13px;
+      opacity: .95;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: rgba(0,0,0,.18);
+      backdrop-filter: blur(6px);
+    }
+
+    @media (max-width: 520px){
+      .card{ padding: 26px; }
+      h1{ font-size: 28px; }
+      .drop{ padding: 28px 18px; }
+      .main-btn{ font-size: 18px; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="card">
-      <div class="top">
-        <div>
-          <h1>PDF → CSV</h1>
-          <div class="hint">Загрузите PDF и скачайте CSV для импорта.</div>
-        </div>
-        <div class="badge">CSV: ; • UTF-8 • BOM</div>
-      </div>
+    <img class="logo" src="/static/logo.png" alt="Бауцентр" />
 
-      <div class="row">
-        <div class="file">
+    <div class="card" id="dropzone">
+      <h1>Конвертация PDF → CSV</h1>
+
+      <div class="drop">
+        <p>Перетащите файл PDF сюда или выберите на устройстве</p>
+        <label class="pick-btn">
+          Выбрать PDF файл
           <input id="pdf" type="file" accept="application/pdf,.pdf" />
-        </div>
-        <button id="btn" disabled>Скачать CSV</button>
+        </label>
       </div>
 
+      <button id="btn" class="main-btn" disabled>Скачать CSV</button>
       <div id="status" class="status"></div>
-
-      <div class="help" id="help" style="display:none;">
-        <div class="helphead">
-          <div class="helptitle">Мини-инструкция</div>
-          <div class="openfull" id="openfull">Открыть полностью</div>
-        </div>
-        <div class="thumb" id="thumb">
-          <video src="/instruction.mp4" muted playsinline preload="metadata"></video>
-        </div>
-      </div>
     </div>
   </div>
 
-  <div class="corner" id="counter">…</div>
-
-  <div class="modal" id="modal" aria-hidden="true">
-    <div class="modalcard">
-      <div class="modalbar">
-        <div class="t">Инструкция</div>
-        <button class="close" id="close">Закрыть</button>
-      </div>
-      <div class="modalbody">
-        <video src="/instruction.mp4" controls playsinline preload="auto"></video>
-      </div>
-    </div>
-  </div>
+  <div class="counter" id="counter">Конвертаций: …</div>
 
   <script>
     const input = document.getElementById('pdf');
     const btn = document.getElementById('btn');
     const statusEl = document.getElementById('status');
-    const help = document.getElementById('help');
-    const thumb = document.getElementById('thumb');
-    const openfull = document.getElementById('openfull');
-    const modal = document.getElementById('modal');
-    const closeBtn = document.getElementById('close');
+    const counterEl = document.getElementById('counter');
+    const dropzone = document.getElementById('dropzone');
 
     function ok(msg){ statusEl.className='status ok'; statusEl.textContent=msg; }
     function err(msg){ statusEl.className='status err'; statusEl.textContent=msg; }
     function neutral(msg){ statusEl.className='status'; statusEl.textContent=msg||''; }
-
-    function openModal(){
-      modal.classList.add('open');
-      modal.setAttribute('aria-hidden','false');
-      try { const v = modal.querySelector('video'); if (v) v.play().catch(()=>{}); } catch(e) {}
-    }
-    function closeModal(){
-      modal.classList.remove('open');
-      modal.setAttribute('aria-hidden','true');
-      try { const v = modal.querySelector('video'); if (v) { v.pause(); v.currentTime = 0; } } catch(e) {}
-    }
-
-    thumb.addEventListener('click', openModal);
-    openfull.addEventListener('click', openModal);
-    closeBtn.addEventListener('click', closeModal);
-    modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
-
-    fetch('/instruction.mp4', { method: 'HEAD' }).then(r => {
-      if (r.ok) {
-        help.style.display = 'block';
-        try { const tv = document.querySelector('#thumb video'); if (tv) tv.play().catch(()=>{}); } catch(e) {}
-      }
-    });
 
     async function loadCounter(){
       try {
@@ -545,11 +591,20 @@ HOME_HTML = """<!doctype html>
         if (!r.ok) return;
         const j = await r.json();
         if (typeof j.conversions === 'number') {
-          document.getElementById('counter').textContent = String(j.conversions);
+          counterEl.textContent = 'Конвертаций: ' + String(j.conversions);
         }
       } catch(e) {}
     }
     loadCounter();
+
+    function setFile(file){
+      if (!file) return;
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      btn.disabled = false;
+      neutral('Выбран файл: ' + file.name);
+    }
 
     input.addEventListener('change', () => {
       const f = input.files && input.files[0];
@@ -557,23 +612,48 @@ HOME_HTML = """<!doctype html>
       neutral(f ? ('Выбран файл: ' + f.name) : '');
     });
 
+    // Drag & drop
+    ['dragenter','dragover'].forEach(ev => {
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.style.transform = 'translateY(-1px)';
+      });
+    });
+    ['dragleave','drop'].forEach(ev => {
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.style.transform = 'translateY(0)';
+      });
+    });
+    dropzone.addEventListener('drop', (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) setFile(f);
+    });
+
     btn.addEventListener('click', async () => {
       const f = input.files && input.files[0];
       if (!f) return;
+
       btn.disabled = true;
       neutral('Обработка…');
+
       try {
         const fd = new FormData();
         fd.append('file', f);
+
         const resp = await fetch('/extract', { method: 'POST', body: fd });
         if (!resp.ok) {
           let text = await resp.text();
           try { const j = JSON.parse(text); if (j.detail) text = String(j.detail); } catch(e) {}
           throw new Error(text || ('HTTP ' + resp.status));
         }
+
         const blob = await resp.blob();
         const base = (f.name || 'items.pdf').replace(/\.pdf$/i, '');
         const filename = base + '.csv';
+
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -583,7 +663,7 @@ HOME_HTML = """<!doctype html>
         a.remove();
         URL.revokeObjectURL(url);
 
-        ok('Готово! Файл скачан: ' + filename);
+        ok('Готово! CSV скачан: ' + filename);
         loadCounter();
       } catch(e) {
         err('Ошибка: ' + String(e.message || e));
@@ -595,6 +675,7 @@ HOME_HTML = """<!doctype html>
 </body>
 </html>
 """
+
 
 
 @app.get("/stats")
