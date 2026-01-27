@@ -451,255 +451,450 @@ HOME_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PDF → CSV</title>
+  <title>bau.pdfcsv.ru — PDF → CSV</title>
   <style>
     :root{
-      --bg:#071426;
+      --bg1:#061225;
+      --bg2:#0b2b57;
       --card:#ffffff;
-      --text:#13274b;
-      --muted:#6c7a90;
-      --dash:#d0d9e8;
-      --btn:#1e5fd8;
-      --btn2:#184fb4;
+      --text:#0b1f3a;
+      --muted:#5f6f86;
+      --stroke:#d7e0ef;
+      --shadow: 0 18px 50px rgba(0,0,0,.22);
+      --brand:#1e5fd8;
+      --brand2:#174aa8;
+      --ok:#1f9d55;
+      --warn:#d97706;
     }
     *{ box-sizing:border-box; }
+    html,body{ height:100%; }
     body{
       margin:0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 50% 20%, #1d4a8a 0%, var(--bg) 60%);
+      background:
+        radial-gradient(900px 500px at 50% 16%, rgba(44,106,202,.55) 0%, rgba(9,33,72,.0) 60%),
+        radial-gradient(1200px 700px at 50% 80%, rgba(10,39,86,.7) 0%, rgba(6,18,37,1) 55%),
+        linear-gradient(180deg, var(--bg2), var(--bg1));
       color: var(--text);
+      overflow-x:hidden;
     }
+    /* subtle grid */
+    body:before{
+      content:"";
+      position:fixed; inset:0;
+      background-image:
+        linear-gradient(to right, rgba(255,255,255,.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255,255,255,.04) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: radial-gradient(700px 380px at 50% 22%, black 0%, transparent 70%);
+      pointer-events:none;
+      opacity:.65;
+    }
+
     .wrap{
-      min-height:100vh;
+      min-height:100%;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: 40px 16px 70px;
+    }
+    .stack{
+      width:min(860px, 100%);
       display:flex;
       flex-direction:column;
       align-items:center;
+      gap:16px;
+    }
+
+    .brand{
+      display:flex;
+      align-items:center;
       justify-content:center;
-      gap:22px;
-      padding:32px;
+      width: 250px;
+      height: 84px;
+      border-radius: 14px;
+      background: rgba(5,27,60,.55);
+      box-shadow: 0 12px 30px rgba(0,0,0,.25);
+      backdrop-filter: blur(8px);
+      border:1px solid rgba(255,255,255,.08);
     }
-    .logo{
-      width:260px;
-      max-width:70vw;
-      height:auto;
-      filter: drop-shadow(0 14px 28px rgba(0,0,0,.28));
+    .brand img{
+      max-width: 190px;
+      max-height: 54px;
+      object-fit: contain;
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,.25));
     }
+
     .card{
-      width:min(760px, 100%);
+      width:min(860px,100%);
       background: var(--card);
-      border-radius: 22px;
-      padding: 36px;
-      box-shadow: 0 25px 70px rgba(0,0,0,.45);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      padding: 26px 26px 20px;
+      position:relative;
+    }
+    .card:after{
+      content:"";
+      position:absolute; inset:0;
+      border-radius: 20px;
+      pointer-events:none;
+      border:1px solid rgba(10,30,60,.08);
+    }
+
+    h1{
+      margin:0;
+      font-size: 30px;
+      letter-spacing:.2px;
       text-align:center;
     }
-    h1{
-      margin:0 0 18px;
-      font-size: 34px;
-      letter-spacing:.2px;
-      color: var(--text);
-    }
-    .drop{
-      margin: 18px 0 26px;
-      border: 2px dashed var(--dash);
-      border-radius: 18px;
-      padding: 34px 22px;
-      background: #fbfcff;
-    }
-    .drop p{
-      margin:0 0 16px;
+    .sub{
+      margin: 8px 0 18px;
+      text-align:center;
       color: var(--muted);
-      font-size: 16px;
-      line-height:1.35;
+      font-size: 14px;
+      line-height:1.45;
     }
-    .pick-btn{
+
+    .zone{
+      border: 2px dashed var(--stroke);
+      border-radius: 18px;
+      padding: 18px;
+      background: linear-gradient(180deg, #fbfcff, #f6f9ff);
+      transition: .15s ease;
+    }
+    .zone.drag{
+      border-color: rgba(30,95,216,.55);
+      box-shadow: 0 0 0 6px rgba(30,95,216,.10);
+    }
+    .zone-inner{
+      display:flex;
+      gap:16px;
+      align-items:center;
+      justify-content:center;
+      flex-wrap:wrap;
+    }
+    .icon{
+      width: 44px;
+      height: 44px;
+      border-radius: 12px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background: rgba(30,95,216,.10);
+      border: 1px solid rgba(30,95,216,.18);
+    }
+    .icon svg{ width:22px; height:22px; }
+    .hint{
+      text-align:center;
+      color: var(--muted);
+      font-size: 14px;
+      margin:0;
+      max-width: 520px;
+    }
+    .row{
+      display:flex;
+      gap:12px;
+      justify-content:center;
+      align-items:center;
+      margin-top: 14px;
+      flex-wrap:wrap;
+    }
+
+    .btn{
+      appearance:none;
+      border:0;
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-weight: 650;
+      cursor:pointer;
+      transition: .15s ease;
+      user-select:none;
       display:inline-flex;
       align-items:center;
       justify-content:center;
       gap:10px;
-      background: var(--btn);
-      color: white;
-      padding: 14px 26px;
-      border-radius: 12px;
-      font-weight: 800;
-      cursor: pointer;
-      user-select:none;
-      box-shadow: 0 10px 25px rgba(30,95,216,.25);
+      min-width: 190px;
+      text-decoration:none;
     }
-    .pick-btn:hover{ background: var(--btn2); }
-    input[type=file]{ display:none; }
+    .btn.primary{
+      background: linear-gradient(180deg, var(--brand), var(--brand2));
+      color: #fff;
+      box-shadow: 0 12px 22px rgba(30,95,216,.28);
+    }
+    .btn.primary:hover{ transform: translateY(-1px); }
+    .btn.secondary{
+      background:#fff;
+      border:1px solid var(--stroke);
+      color: var(--text);
+    }
+    .btn.secondary:hover{ border-color: rgba(30,95,216,.35); }
+    .btn:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+      transform:none !important;
+      box-shadow:none !important;
+    }
 
-    .main-btn{
-      width:100%;
-      border: none;
-      background: linear-gradient(180deg, #2b74ff, #1c56c7);
-      color: white;
-      padding: 18px;
-      border-radius: 14px;
-      font-size: 20px;
-      font-weight: 900;
-      cursor: pointer;
-      box-shadow: 0 16px 35px rgba(30,95,216,.28);
+    .fileline{
+      margin-top: 10px;
+      text-align:center;
+      color: var(--muted);
+      font-size: 13px;
     }
-    .main-btn:disabled{
-      opacity: .55;
-      cursor: not-allowed;
-      box-shadow:none;
+    .filepill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border:1px solid var(--stroke);
+      background: #fff;
+      max-width: 100%;
     }
+    .filepill b{
+      font-weight: 650;
+      color: var(--text);
+      white-space: nowrap;
+      overflow:hidden;
+      text-overflow: ellipsis;
+      max-width: 520px;
+    }
+
     .status{
       margin-top: 14px;
-      min-height: 22px;
-      font-size: 14px;
-      color: var(--muted);
-      white-space: pre-wrap;
-    }
-    .status.ok{ color: #108a44; }
-    .status.err{ color: #c2283a; }
-
-    .counter{
-      position: fixed;
-      right: 18px;
-      bottom: 16px;
-      color: #b8c6df;
       font-size: 13px;
-      opacity: .95;
+      text-align:center;
+      min-height: 18px;
+    }
+    .status.ok{ color: var(--ok); }
+    .status.err{ color: #b42318; }
+    .status.warn{ color: var(--warn); }
+
+    .footer{
+      margin-top: 18px;
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      color: var(--muted);
+      font-size: 12px;
+      flex-wrap:wrap;
+    }
+    .footer a{ color: var(--brand2); text-decoration:none; }
+    .footer a:hover{ text-decoration:underline; }
+
+    /* floating counter */
+    .counter{
+      position:fixed;
+      right: 16px;
+      bottom: 16px;
+      background: rgba(5,27,60,.62);
+      color:#fff;
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 999px;
-      padding: 6px 10px;
-      background: rgba(0,0,0,.18);
-      backdrop-filter: blur(6px);
+      padding: 8px 12px;
+      font-size: 12px;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 14px 28px rgba(0,0,0,.25);
+    }
+    .dot{
+      width:8px;height:8px;border-radius:99px;
+      background: #22c55e;
+      box-shadow: 0 0 0 4px rgba(34,197,94,.18);
     }
 
-    @media (max-width: 520px){
-      .card{ padding: 26px; }
-      h1{ font-size: 28px; }
-      .drop{ padding: 28px 18px; }
-      .main-btn{ font-size: 18px; }
+    /* mobile */
+    @media (max-width:560px){
+      .brand{ width: 220px; height: 78px; }
+      .card{ padding: 20px 16px 16px; border-radius: 18px; }
+      h1{ font-size: 24px; }
+      .btn{ min-width: 100%; }
+      .filepill b{ max-width: 260px; }
+      .footer{ justify-content:center; text-align:center; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <img class="logo" src="/static/logo.png" alt="Бауцентр" />
-
-    <div class="card" id="dropzone">
-      <h1>Конвертация PDF → CSV</h1>
-
-      <div class="drop">
-        <p>Перетащите файл PDF сюда или выберите на устройстве</p>
-        <label class="pick-btn">
-          Выбрать PDF файл
-          <input id="pdf" type="file" accept="application/pdf,.pdf" />
-        </label>
+    <div class="stack">
+      <div class="brand">
+        <img src="/static/logo.png" alt="Бауцентр" onerror="this.style.display='none'">
       </div>
 
-      <button id="btn" class="main-btn" disabled>Скачать CSV</button>
-      <div id="status" class="status"></div>
+      <div class="card">
+        <h1>Конвертация PDF → CSV</h1>
+        <p class="sub">
+          Загрузите PDF (отчёт/корзина из конфигуратора) — получите CSV для загрузки в Товарооборот.<br>
+          Можно просто перетащить файл в область ниже.
+        </p>
+
+        <div id="zone" class="zone">
+          <div class="zone-inner">
+            <div class="icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M12 3v10m0-10l-4 4m4-4l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <p class="hint">
+              Перетащите PDF сюда или выберите файл на устройстве.
+            </p>
+          </div>
+
+          <div class="row">
+            <input id="file" type="file" accept="application/pdf" hidden />
+            <button id="pick" class="btn secondary" type="button">Выбрать PDF</button>
+            <button id="go" class="btn primary" type="button" disabled>
+              <span id="goText">Скачать CSV</span>
+              <span id="spinner" style="display:none">⏳</span>
+            </button>
+          </div>
+
+          <div class="fileline" id="fileline" style="display:none">
+            <span class="filepill">
+              ✅ <span>Файл:</span> <b id="fname"></b>
+            </span>
+          </div>
+        </div>
+
+        <div id="status" class="status"></div>
+
+        <div class="footer">
+          <div>Поддерживаются: корзина Praktik Home и отчёты формата «ID Фото Товар … Кол-во».</div>
+          <div><a href="/health" target="_blank" rel="noopener">Проверка сервиса</a></div>
+        </div>
+      </div>
     </div>
   </div>
 
-  <div class="counter" id="counter">Конвертаций: …</div>
+  <div class="counter"><span class="dot"></span><span id="count">Конвертаций: …</span></div>
 
   <script>
-    const input = document.getElementById('pdf');
-    const btn = document.getElementById('btn');
+    const zone = document.getElementById('zone');
+    const fileInput = document.getElementById('file');
+    const pickBtn = document.getElementById('pick');
+    const goBtn = document.getElementById('go');
+    const goText = document.getElementById('goText');
+    const spinner = document.getElementById('spinner');
     const statusEl = document.getElementById('status');
-    const counterEl = document.getElementById('counter');
-    const dropzone = document.getElementById('dropzone');
+    const fileline = document.getElementById('fileline');
+    const fname = document.getElementById('fname');
 
-    function ok(msg){ statusEl.className='status ok'; statusEl.textContent=msg; }
-    function err(msg){ statusEl.className='status err'; statusEl.textContent=msg; }
-    function neutral(msg){ statusEl.className='status'; statusEl.textContent=msg||''; }
+    let selectedFile = null;
 
-    async function loadCounter(){
-      try {
-        const r = await fetch('/stats');
-        if (!r.ok) return;
-        const j = await r.json();
-        if (typeof j.conversions === 'number') {
-          counterEl.textContent = 'Конвертаций: ' + String(j.conversions);
-        }
-      } catch(e) {}
-    }
-    loadCounter();
-
-    function setFile(file){
-      if (!file) return;
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      input.files = dt.files;
-      btn.disabled = false;
-      neutral('Выбран файл: ' + file.name);
+    function setStatus(msg, cls){
+      statusEl.className = 'status ' + (cls || '');
+      statusEl.textContent = msg || '';
     }
 
-    input.addEventListener('change', () => {
-      const f = input.files && input.files[0];
-      btn.disabled = !f;
-      neutral(f ? ('Выбран файл: ' + f.name) : '');
+    function setBusy(b){
+      goBtn.disabled = b || !selectedFile;
+      spinner.style.display = b ? 'inline' : 'none';
+      goText.textContent = b ? 'Конвертирую…' : 'Скачать CSV';
+      pickBtn.disabled = b;
+      zone.style.pointerEvents = b ? 'none' : 'auto';
+      zone.style.opacity = b ? '.85' : '1';
+    }
+
+    function setFile(f){
+      selectedFile = f;
+      if (f){
+        fname.textContent = f.name;
+        fileline.style.display = 'block';
+        goBtn.disabled = false;
+        setStatus('', '');
+      }else{
+        fileline.style.display = 'none';
+        goBtn.disabled = true;
+      }
+    }
+
+    pickBtn.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files && fileInput.files[0];
+      if (f) setFile(f);
     });
 
-    // Drag & drop
-    ['dragenter','dragover'].forEach(ev => {
-      dropzone.addEventListener(ev, (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dropzone.style.transform = 'translateY(-1px)';
+    ['dragenter','dragover'].forEach(evt => {
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.add('drag');
       });
     });
-    ['dragleave','drop'].forEach(ev => {
-      dropzone.addEventListener(ev, (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        dropzone.style.transform = 'translateY(0)';
+    ['dragleave','drop'].forEach(evt => {
+      zone.addEventListener(evt, (e) => {
+        e.preventDefault(); e.stopPropagation();
+        zone.classList.remove('drag');
       });
     });
-    dropzone.addEventListener('drop', (e) => {
+    zone.addEventListener('drop', (e) => {
       const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
       if (f) setFile(f);
     });
 
-    btn.addEventListener('click', async () => {
-      const f = input.files && input.files[0];
-      if (!f) return;
+    goBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      setBusy(true);
+      setStatus('', '');
 
-      btn.disabled = true;
-      neutral('Обработка…');
-
-      try {
+      try{
         const fd = new FormData();
-        fd.append('file', f);
+        fd.append('file', selectedFile, selectedFile.name);
 
-        const resp = await fetch('/extract', { method: 'POST', body: fd });
-        if (!resp.ok) {
-          let text = await resp.text();
-          try { const j = JSON.parse(text); if (j.detail) text = String(j.detail); } catch(e) {}
-          throw new Error(text || ('HTTP ' + resp.status));
+        const res = await fetch('/extract', { method:'POST', body: fd });
+        if (!res.ok){
+          let msg = 'Ошибка конвертации';
+          try{
+            const j = await res.json();
+            msg = (j && j.detail) ? j.detail : msg;
+          }catch(_){}
+          setStatus(msg, 'err');
+          setBusy(false);
+          return;
         }
 
-        const blob = await resp.blob();
-        const base = (f.name || 'items.pdf').replace(/\.pdf$/i, '');
-        const filename = base + '.csv';
-
-        const url = URL.createObjectURL(blob);
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename;
+
+        // имя из Content-Disposition если есть
+        const cd = res.headers.get('Content-Disposition') || '';
+        const m = /filename="([^"]+)"/i.exec(cd);
+        a.download = m ? m[1] : 'items.csv';
+
         document.body.appendChild(a);
         a.click();
         a.remove();
-        URL.revokeObjectURL(url);
+        window.URL.revokeObjectURL(url);
 
-        ok('Готово! CSV скачан: ' + filename);
-        loadCounter();
-      } catch(e) {
-        err('Ошибка: ' + String(e.message || e));
-      } finally {
-        btn.disabled = !(input.files && input.files[0]);
+        setStatus('Готово! CSV скачан.', 'ok');
+        await refreshCounter();
+      }catch(e){
+        setStatus('Не удалось выполнить запрос. Проверьте интернет/сервер.', 'err');
+      }finally{
+        setBusy(false);
       }
     });
+
+    async function refreshCounter(){
+      try{
+        const r = await fetch('/stats');
+        const j = await r.json();
+        if (j && typeof j.total === 'number'){
+          document.getElementById('count').textContent = 'Конвертаций: ' + j.total;
+        }
+      }catch(_){}
+    }
+    refreshCounter();
   </script>
 </body>
 </html>
 """
+
 
 
 
