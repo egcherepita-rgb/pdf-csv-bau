@@ -237,7 +237,13 @@ def is_project_total_only(line: str, prev_line: str = "") -> bool:
 
 def is_header_token(line: str) -> bool:
     low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
-    return low in {"фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма"}
+
+    # может быть как отдельные токены, так и вся шапка таблицы одной строкой:
+    if ("id" in low and "товар" in low and "кол-во" in low and "сумма" in low):
+        return True
+
+    return low in {"id", "фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма"}
+
 
 
 def looks_like_dim_or_weight(line: str) -> bool:
@@ -262,6 +268,25 @@ def clean_name_from_buffer(buf: List[str]) -> str:
         if is_noise(ln) or is_header_token(ln) or is_totals_block(ln):
             continue
         filtered.append(ln)
+
+    # убираем "хвосты" (габариты/вес/деньги/кол-во), которые могли попасть в буфер
+    while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
+        filtered.pop()
+
+    name = normalize_space(" ".join(filtered))
+
+    # убираем возможные заголовки
+    name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
+    name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
+
+    # В отчётах формата "ID Фото Товар ..." у каждой позиции часто первым идёт числовой ID (код).
+    # Он НЕ является "наименованием", поэтому срезаем его из начала.
+    name = re.sub(r"^(?:ID\s*)?\d{6,}\s+", "", name, flags=re.IGNORECASE).strip()
+
+    # убираем габариты, если они где-то встроены в строку
+    name = strip_dims_anywhere(name)
+    return name
+
 
     while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
         filtered.pop()
