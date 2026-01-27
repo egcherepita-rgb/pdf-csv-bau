@@ -461,8 +461,11 @@ HOME_HTML = """<!doctype html>
       --muted:#5f6f86;
       --stroke:#d7e0ef;
       --shadow: 0 18px 50px rgba(0,0,0,.22);
-      --brand:#1e5fd8;
-      --brand2:#174aa8;
+
+      /* Baucenter-like accents */
+      --brand:#0b4aa2;     /* фирменный синий */
+      --brand2:#083a83;    /* тёмный синий */
+      --accent:#e41e2b;    /* фирменный красный */
       --ok:#1f9d55;
       --warn:#d97706;
     }
@@ -506,23 +509,34 @@ HOME_HTML = """<!doctype html>
       gap:16px;
     }
 
-    .brand{
+        .brand{
       display:flex;
       align-items:center;
       justify-content:center;
-      width: 250px;
-      height: 84px;
-      border-radius: 14px;
-      background: rgba(5,27,60,.55);
-      box-shadow: 0 12px 30px rgba(0,0,0,.25);
-      backdrop-filter: blur(8px);
-      border:1px solid rgba(255,255,255,.08);
+      width: min(820px, 100%);
+      padding: 10px 10px 0;
     }
     .brand img{
-      max-width: 190px;
-      max-height: 54px;
+      width: min(820px, 100%);
+      height: auto;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,.14);
+      box-shadow: 0 22px 48px rgba(0,0,0,.28);
+      display:block;
+    }
+    .brand-line{
+      width: min(820px, 100%);
+      height: 6px;
+      border-radius: 999px;
+      margin: 10px auto 0;
+      background: linear-gradient(90deg, var(--accent), #ff4d57);
+      box-shadow: 0 14px 24px rgba(228,30,43,.25);
+    }
+    .brand img{
+      max-width: 300px;
+      max-height: 82px;
       object-fit: contain;
-      filter: drop-shadow(0 10px 18px rgba(0,0,0,.25));
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,.28));
     }
 
     .card{
@@ -563,8 +577,8 @@ HOME_HTML = """<!doctype html>
       transition: .15s ease;
     }
     .zone.drag{
-      border-color: rgba(30,95,216,.55);
-      box-shadow: 0 0 0 6px rgba(30,95,216,.10);
+      border-color: rgba(228,30,43,.55);
+      box-shadow: 0 0 0 6px rgba(228,30,43,.10);
     }
     .zone-inner{
       display:flex;
@@ -580,8 +594,8 @@ HOME_HTML = """<!doctype html>
       display:flex;
       align-items:center;
       justify-content:center;
-      background: rgba(30,95,216,.10);
-      border: 1px solid rgba(30,95,216,.18);
+      background: rgba(11,74,162,.10);
+      border: 1px solid rgba(228,30,43,.20);
     }
     .icon svg{ width:22px; height:22px; }
     .hint{
@@ -618,6 +632,7 @@ HOME_HTML = """<!doctype html>
     }
     .btn.primary{
       background: linear-gradient(180deg, var(--brand), var(--brand2));
+      border: 1px solid rgba(255,255,255,.18);
       color: #fff;
       box-shadow: 0 12px 22px rgba(30,95,216,.28);
     }
@@ -633,6 +648,11 @@ HOME_HTML = """<!doctype html>
       cursor:not-allowed;
       transform:none !important;
       box-shadow:none !important;
+    }
+
+    .btn:focus{ outline:none; }
+    .btn:focus-visible{
+      box-shadow: 0 0 0 4px rgba(228,30,43,.18), 0 0 0 1px rgba(228,30,43,.55) inset;
     }
 
     .fileline{
@@ -687,7 +707,7 @@ HOME_HTML = """<!doctype html>
       position:fixed;
       right: 16px;
       bottom: 16px;
-      background: rgba(5,27,60,.62);
+      background: linear-gradient(180deg, rgba(6,32,70,.82), rgba(4,22,50,.76));
       color:#fff;
       border: 1px solid rgba(255,255,255,.12);
       border-radius: 999px;
@@ -701,13 +721,13 @@ HOME_HTML = """<!doctype html>
     }
     .dot{
       width:8px;height:8px;border-radius:99px;
-      background: #22c55e;
-      box-shadow: 0 0 0 4px rgba(34,197,94,.18);
+      background: var(--accent);
+      box-shadow: 0 0 0 4px rgba(228,30,43,.18);
     }
 
     /* mobile */
     @media (max-width:560px){
-      .brand{ width: 220px; height: 78px; }
+      .brand{ width: 100%; padding: 8px 8px 0; }
       .card{ padding: 20px 16px 16px; border-radius: 18px; }
       h1{ font-size: 24px; }
       .btn{ min-width: 100%; }
@@ -722,6 +742,7 @@ HOME_HTML = """<!doctype html>
       <div class="brand">
         <img src="/static/logo.png" alt="Бауцентр" onerror="this.style.display='none'">
       </div>
+      <div class="brand-line" aria-hidden="true"></div>
 
       <div class="card">
         <h1>Конвертация PDF → CSV</h1>
@@ -761,10 +782,7 @@ HOME_HTML = """<!doctype html>
 
         <div id="status" class="status"></div>
 
-        <div class="footer">
-          <div>Поддерживаются: корзина Praktik Home и отчёты формата «ID Фото Товар … Кол-во».</div>
-          <div><a href="/health" target="_blank" rel="noopener">Проверка сервиса</a></div>
-        </div>
+        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">Проверка сервиса</a></div></div>
       </div>
     </div>
   </div>
