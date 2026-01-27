@@ -506,33 +506,44 @@ HOME_HTML = """<!doctype html>
       display:flex;
       flex-direction:column;
       align-items:center;
-      gap:16px;
+      gap:14px;
     }
 
-        .brand{
+            .brand{
+      width: min(860px, 100%);
       display:flex;
       align-items:center;
       justify-content:center;
-      width: min(820px, 100%);
-      padding: 10px 10px 0;
-    }
-    .brand img{
-      width: min(820px, 100%);
-      height: auto;
+      padding: 12px 14px;
       border-radius: 18px;
-      border: 1px solid rgba(255,255,255,.14);
-      box-shadow: 0 22px 48px rgba(0,0,0,.28);
-      display:block;
+      background: linear-gradient(180deg, rgba(11,43,87,.92), rgba(6,18,37,.72));
+      border: 1px solid rgba(255,255,255,.10);
+      box-shadow: 0 18px 40px rgba(0,0,0,.28);
+      backdrop-filter: blur(10px);
+      position:relative;
+      overflow:hidden;
     }
-    .brand-line{
-      width: min(820px, 100%);
-      height: 6px;
-      border-radius: 999px;
-      margin: 10px auto 0;
-      background: linear-gradient(90deg, var(--accent), #ff4d57);
-      box-shadow: 0 14px 24px rgba(228,30,43,.25);
+    .brand:before{
+      content:"";
+      position:absolute; inset:0;
+      background:
+        radial-gradient(520px 160px at 50% 0%, rgba(255,255,255,.10) 0%, rgba(255,255,255,0) 70%),
+        linear-gradient(90deg, rgba(228,30,43,.0), rgba(228,30,43,.18), rgba(228,30,43,.0));
+      opacity:.85;
+      pointer-events:none;
+      mix-blend-mode: screen;
     }
     .brand img{
+      height: 60px;
+      width: auto;
+      max-width: 100%;
+      object-fit: contain;
+      display:block;
+      /* чуть отделяем от фона, но без ощущения "вставки" */
+      filter: drop-shadow(0 10px 18px rgba(0,0,0,.20));
+      position:relative;
+    }
+        .brand img{
       max-width: 300px;
       max-height: 82px;
       object-fit: contain;
@@ -582,7 +593,7 @@ HOME_HTML = """<!doctype html>
     }
     .zone-inner{
       display:flex;
-      gap:16px;
+      gap:14px;
       align-items:center;
       justify-content:center;
       flex-wrap:wrap;
@@ -742,12 +753,12 @@ HOME_HTML = """<!doctype html>
       <div class="brand">
         <img src="/static/logo.png" alt="Бауцентр" onerror="this.style.display='none'">
       </div>
-      <div class="brand-line" aria-hidden="true"></div>
+      
 
       <div class="card">
         <h1>Конвертация PDF → CSV</h1>
         <p class="sub">
-          Загрузите PDF из 3D конфигуратора — получите CSV.<br>
+          Загрузите PDF (отчёт/корзина из конфигуратора) — получите CSV для загрузки в Товарооборот.<br>
           Можно просто перетащить файл в область ниже.
         </p>
 
@@ -977,4 +988,3 @@ async def extract(file: UploadFile = File(...)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="items.csv"'},
     )
-
