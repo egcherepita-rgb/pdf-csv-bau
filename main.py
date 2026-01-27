@@ -758,7 +758,7 @@ HOME_HTML = """<!doctype html>
       <div class="card">
         <h1>Конвертация PDF → CSV</h1>
         <p class="sub">
-          Загрузите PDF (отчёт/корзина из конфигуратора) — получите CSV для загрузки в Товарооборот.<br>
+          Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите файл CSV.<br>
           Можно просто перетащить файл в область ниже.
         </p>
 
@@ -793,7 +793,7 @@ HOME_HTML = """<!doctype html>
 
         <div id="status" class="status"></div>
 
-        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">Проверка сервиса</a></div></div>
+        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">.</a></div></div>
       </div>
     </div>
   </div>
@@ -988,3 +988,4 @@ async def extract(file: UploadFile = File(...)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="items.csv"'},
     )
+
