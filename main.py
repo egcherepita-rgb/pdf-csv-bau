@@ -758,7 +758,7 @@ HOME_HTML = """<!doctype html>
       <div class="card">
         <h1>Конвертация PDF → CSV</h1>
         <p class="sub">
-          Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите файл CSV.<br>
+          Загрузите PDF (отчёт/корзина из конфигуратора) — получите CSV для загрузки в Товарооборот.<br>
           Можно просто перетащить файл в область ниже.
         </p>
 
@@ -793,7 +793,7 @@ HOME_HTML = """<!doctype html>
 
         <div id="status" class="status"></div>
 
-        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">.</a></div></div>
+        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">Проверка сервиса</a></div></div>
       </div>
     </div>
   </div>
@@ -893,7 +893,7 @@ HOME_HTML = """<!doctype html>
         // имя из Content-Disposition если есть
         const cd = res.headers.get('Content-Disposition') || '';
         const m = /filename="([^"]+)"/i.exec(cd);
-        a.download = m ? m[1] : 'items.csv';
+        a.download = m ? m[1] : (selectedFile.name.replace(/\.pdf$/i, '') + '.csv');
 
         document.body.appendChild(a);
         a.click();
@@ -965,6 +965,8 @@ async def extract(file: UploadFile = File(...)):
 
     pdf_bytes = await file.read()
 
+    pdf_filename = file.filename or "items.pdf"
+
     try:
         rows, stats = parse_items(pdf_bytes)
     except Exception as e:
@@ -986,6 +988,5 @@ async def extract(file: UploadFile = File(...)):
     return Response(
         content=csv_bytes,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="items.csv"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe_download_name(pdf_filename, "csv")}"'},
     )
-
