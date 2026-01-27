@@ -747,7 +747,7 @@ HOME_HTML = """<!doctype html>
       <div class="card">
         <h1>Конвертация PDF → CSV</h1>
         <p class="sub">
-          Загрузите PDF (отчёт/корзина из конфигуратора) — получите CSV для загрузки в Товарооборот.<br>
+          Загрузите PDF из 3D конфигуратора — получите CSV.<br>
           Можно просто перетащить файл в область ниже.
         </p>
 
@@ -977,3 +977,4 @@ async def extract(file: UploadFile = File(...)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="items.csv"'},
     )
+
