@@ -1,10 +1,11 @@
 import io
 import os
 import re
-from urllib.parse import quote
+import csv
 from collections import OrderedDict
 from typing import List, Tuple, Dict
 
+from urllib.parse import quote
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import Response, HTMLResponse, FileResponse
@@ -17,7 +18,7 @@ except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.1")
+app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.0")
 
 # -------------------------
 # Static files (logo, etc.)
@@ -416,8 +417,20 @@ def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
     ws.append(["Артикул", "ШТ", "Площадь"])
 
     for name, qty in rows:
-        article = ARTICLE_MAP.get(normalize_key(name), "")
-        ws.append([article, qty, ""])
+        article_raw = ARTICLE_MAP.get(normalize_key(name), "")
+        # Если артикул состоит только из цифр и не слишком длинный — пишем числом,
+        # иначе оставляем текст (чтобы не терять точность/нули).
+        article_val = article_raw
+        if isinstance(article_raw, str):
+            a = article_raw.strip()
+            if a.isdigit() and len(a) <= 15:
+                try:
+                    article_val = int(a)
+                except Exception:
+                    article_val = a
+            else:
+                article_val = a
+        ws.append([article_val, qty, ""])
 
     # Чуть удобнее читать (не обязательно)
     try:
@@ -443,18 +456,15 @@ def safe_filename_base(filename: str) -> str:
 
 def content_disposition(filename_utf8: str) -> str:
     """
-    Исправление для кириллицы в имени файла.
-    Starlette иногда не может положить кириллицу в заголовок (latin-1).
-    Поэтому:
-      - filename="..." -> ASCII-safe
-      - filename*=UTF-8''... -> реальное UTF-8 имя для браузеров
+    Исправление для кириллицы в имени файла:
+    - filename="..." должен быть ASCII-safe (иначе starlette может пытаться кодировать latin-1 и падать)
+    - filename*=UTF-8''... передаёт реальное имя в UTF-8 (RFC 5987), современные браузеры его понимают
     """
     ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename_utf8)
     if not ascii_name:
         ascii_name = "items.xlsx"
     quoted = quote(filename_utf8, safe="")
     return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
-
 
 # -------------------------
 # UI (Logo + clean page)
@@ -887,8 +897,21 @@ HOME_HTML = """<!doctype html>
         a.href = url;
 
         const cd = res.headers.get('Content-Disposition') || '';
-        const m = /filename="([^"]+)"/i.exec(cd);
-        a.download = m ? m[1] : 'items.xlsx';
+
+        // 1) Пробуем filename*=UTF-8''... (правильное имя, включая кириллицу)
+        let filename = null;
+        const mStar = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
+        if (mStar && mStar[1]) {
+          try { filename = decodeURIComponent(mStar[1]); } catch (e) { filename = mStar[1]; }
+        }
+
+        // 2) Fallback на обычный filename="..." (ASCII-safe)
+        if (!filename) {
+          const m = /filename="([^"]+)"/i.exec(cd);
+          if (m && m[1]) filename = m[1];
+        }
+
+        a.download = filename || 'items.xlsx';
 
         document.body.appendChild(a);
         a.click();
