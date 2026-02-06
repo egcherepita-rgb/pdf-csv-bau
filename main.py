@@ -1,7 +1,7 @@
 import io
 import os
 import re
-import csv
+from urllib.parse import quote
 from collections import OrderedDict
 from typing import List, Tuple, Dict
 
@@ -17,7 +17,7 @@ except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.0")
+app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.1")
 
 # -------------------------
 # Static files (logo, etc.)
@@ -439,6 +439,21 @@ def safe_filename_base(filename: str) -> str:
     # убираем совсем проблемные символы для заголовка Content-Disposition
     base = re.sub(r'[\\/:*?"<>|]+', "_", base)
     return base
+
+
+def content_disposition(filename_utf8: str) -> str:
+    """
+    Исправление для кириллицы в имени файла.
+    Starlette иногда не может положить кириллицу в заголовок (latin-1).
+    Поэтому:
+      - filename="..." -> ASCII-safe
+      - filename*=UTF-8''... -> реальное UTF-8 имя для браузеров
+    """
+    ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename_utf8)
+    if not ascii_name:
+        ascii_name = "items.xlsx"
+    quoted = quote(filename_utf8, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
 
 
 # -------------------------
@@ -974,5 +989,5 @@ async def extract(file: UploadFile = File(...)):
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
+        headers={"Content-Disposition": content_disposition(out_name)},
     )
