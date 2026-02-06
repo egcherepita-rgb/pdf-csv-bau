@@ -12,11 +12,12 @@ from fastapi.staticfiles import StaticFiles
 
 try:
     import openpyxl  # requires openpyxl in requirements.txt
+    from openpyxl.utils import get_column_letter
 except Exception:
     openpyxl = None
 
 
-app = FastAPI(title="PDF → CSV (артикул / наименование / всего / категория)", version="3.8.0")
+app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.0")
 
 # -------------------------
 # Static files (logo, etc.)
@@ -90,8 +91,7 @@ def load_article_map() -> Tuple[Dict[str, str], str, str]:
     if not os.path.exists(path):
         return {}, f"file_not_found:{path}", ""
 
-    # Какой столбец брать как "Артикул" в итоговом CSV
-    # (по умолчанию берём "Кастомный ID", но можно переопределить)
+    # Какой столбец брать как "Артикул" в итоговом файле
     desired_value_col = normalize_space(os.getenv("ART_VALUE_COLUMN", "Кастомный ID"))
 
     try:
@@ -102,7 +102,6 @@ def load_article_map() -> Tuple[Dict[str, str], str, str]:
 
     header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
 
-    # ищем колонки по названиям
     товар_col = None
     value_col = None
 
@@ -113,12 +112,11 @@ def load_article_map() -> Tuple[Dict[str, str], str, str]:
         if h == desired_value_col:
             value_col = idx
 
-    # fallback-логика, если вдруг заголовок отличается/не найден:
     if товар_col is None:
-        товар_col = 1  # как раньше
+        товар_col = 1  # fallback
 
     if value_col is None:
-        # пробуем "Артикул", если "Кастомный ID" не найден
+        # fallback на "Артикул"
         for idx, h in enumerate(header, start=1):
             if h.lower() == "артикул":
                 value_col = idx
@@ -146,8 +144,6 @@ def load_article_map() -> Tuple[Dict[str, str], str, str]:
 
 
 ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN = load_article_map()
-
-CATEGORY_VALUE = 2
 
 # -------------------------
 # Счетчик конвертаций (простое файловое хранилище)
@@ -237,13 +233,9 @@ def is_project_total_only(line: str, prev_line: str = "") -> bool:
 
 def is_header_token(line: str) -> bool:
     low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
-
-    # может быть как отдельные токены, так и вся шапка таблицы одной строкой:
     if ("id" in low and "товар" in low and "кол-во" in low and "сумма" in low):
         return True
-
     return low in {"id", "фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма"}
-
 
 
 def looks_like_dim_or_weight(line: str) -> bool:
@@ -269,31 +261,18 @@ def clean_name_from_buffer(buf: List[str]) -> str:
             continue
         filtered.append(ln)
 
-    # убираем "хвосты" (габариты/вес/деньги/кол-во), которые могли попасть в буфер
+    # убираем хвосты
     while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
         filtered.pop()
 
     name = normalize_space(" ".join(filtered))
 
-    # убираем возможные заголовки
+    # убираем возможные заголовки и ID в начале
     name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
     name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
-
-    # В отчётах формата "ID Фото Товар ..." у каждой позиции часто первым идёт числовой ID (код).
-    # Он НЕ является "наименованием", поэтому срезаем его из начала.
     name = re.sub(r"^(?:ID\s*)?\d{6,}\s+", "", name, flags=re.IGNORECASE).strip()
 
-    # убираем габариты, если они где-то встроены в строку
-    name = strip_dims_anywhere(name)
-    return name
-
-
-    while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
-        filtered.pop()
-
-    name = normalize_space(" ".join(filtered))
-    name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
-    name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
+    # убираем габариты внутри строки
     name = strip_dims_anywhere(name)
     return name
 
@@ -418,31 +397,50 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
 
 
 # -------------------------
-# CSV output (Excel-friendly)
+# Excel output (.xlsx)
 # -------------------------
-def make_csv_excel_friendly(rows: List[Tuple[str, int]]) -> bytes:
-    out = io.StringIO()
-    writer = csv.writer(
-        out,
-        delimiter=";",
-        quotechar='"',
-        quoting=csv.QUOTE_MINIMAL,
-        lineterminator="\r\n",
-    )
+def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
+    """
+    Формат:
+      A: Артикул  (берем из ARTICLE_MAP по наименованию)
+      B: ШТ       (количество)
+      C: Площадь  (пусто)
+    """
+    if openpyxl is None:
+        raise RuntimeError("openpyxl не установлен. Добавьте openpyxl в requirements.txt")
 
-    # ВНИМАНИЕ: колонка называется "Артикул", но значение будет из "Кастомный ID" (по умолчанию)
-    writer.writerow(["Артикул", "Наименование", "Всего"])
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "items"
+
+    ws.append(["Артикул", "ШТ", "Площадь"])
 
     for name, qty in rows:
-        custom_id = ARTICLE_MAP.get(normalize_key(name), "")
-        writer.writerow([custom_id, name, qty])
+        article = ARTICLE_MAP.get(normalize_key(name), "")
+        ws.append([article, qty, ""])
 
-    return out.getvalue().encode("utf-8-sig")  # UTF-8 BOM
+    # Чуть удобнее читать (не обязательно)
+    try:
+        widths = [18, 8, 12]
+        for col_idx, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = w
+        ws.freeze_panes = "A2"
+    except Exception:
+        pass
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
 
 
-# -------------------------
-# UI (миниатюра + открыть полностью)
-# -------------------------
+def safe_filename_base(filename: str) -> str:
+    base = os.path.splitext(filename or "items")[0]
+    base = base.strip() or "items"
+    # убираем совсем проблемные символы для заголовка Content-Disposition
+    base = re.sub(r'[\\/:*?"<>|]+', "_", base)
+    return base
+
+
 # -------------------------
 # UI (Logo + clean page)
 # -------------------------
@@ -451,7 +449,7 @@ HOME_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>bau.pdfcsv.ru — PDF → CSV</title>
+  <title>bau.pdfcsv.ru — PDF → Excel</title>
   <style>
     :root{
       --bg1:#061225;
@@ -461,11 +459,9 @@ HOME_HTML = """<!doctype html>
       --muted:#5f6f86;
       --stroke:#d7e0ef;
       --shadow: 0 18px 50px rgba(0,0,0,.22);
-
-      /* Baucenter-like accents */
-      --brand:#0b4aa2;     /* фирменный синий */
-      --brand2:#083a83;    /* тёмный синий */
-      --accent:#e41e2b;    /* фирменный красный */
+      --brand:#0b4aa2;
+      --brand2:#083a83;
+      --accent:#e41e2b;
       --ok:#1f9d55;
       --warn:#d97706;
     }
@@ -481,7 +477,6 @@ HOME_HTML = """<!doctype html>
       color: var(--text);
       overflow-x:hidden;
     }
-    /* subtle grid */
     body:before{
       content:"";
       position:fixed; inset:0;
@@ -493,7 +488,6 @@ HOME_HTML = """<!doctype html>
       pointer-events:none;
       opacity:.65;
     }
-
     .wrap{
       min-height:100%;
       display:flex;
@@ -508,8 +502,7 @@ HOME_HTML = """<!doctype html>
       align-items:center;
       gap:14px;
     }
-
-            .brand{
+    .brand{
       width: min(860px, 100%);
       display:flex;
       align-items:center;
@@ -534,20 +527,12 @@ HOME_HTML = """<!doctype html>
       mix-blend-mode: screen;
     }
     .brand img{
-      height: 60px;
-      width: auto;
-      max-width: 100%;
-      object-fit: contain;
-      display:block;
-      /* чуть отделяем от фона, но без ощущения "вставки" */
-      filter: drop-shadow(0 10px 18px rgba(0,0,0,.20));
-      position:relative;
-    }
-        .brand img{
       max-width: 300px;
       max-height: 82px;
       object-fit: contain;
+      display:block;
       filter: drop-shadow(0 10px 18px rgba(0,0,0,.28));
+      position:relative;
     }
 
     .card{
@@ -660,7 +645,6 @@ HOME_HTML = """<!doctype html>
       transform:none !important;
       box-shadow:none !important;
     }
-
     .btn:focus{ outline:none; }
     .btn:focus-visible{
       box-shadow: 0 0 0 4px rgba(228,30,43,.18), 0 0 0 1px rgba(228,30,43,.55) inset;
@@ -713,7 +697,6 @@ HOME_HTML = """<!doctype html>
     .footer a{ color: var(--brand2); text-decoration:none; }
     .footer a:hover{ text-decoration:underline; }
 
-    /* floating counter */
     .counter{
       position:fixed;
       right: 16px;
@@ -736,7 +719,6 @@ HOME_HTML = """<!doctype html>
       box-shadow: 0 0 0 4px rgba(228,30,43,.18);
     }
 
-    /* mobile */
     @media (max-width:560px){
       .brand{ width: 100%; padding: 8px 8px 0; }
       .card{ padding: 20px 16px 16px; border-radius: 18px; }
@@ -753,13 +735,12 @@ HOME_HTML = """<!doctype html>
       <div class="brand">
         <img src="/static/logo.png" alt="Бауцентр" onerror="this.style.display='none'">
       </div>
-      
 
       <div class="card">
-        <h1>Конвертация PDF → CSV</h1>
+        <h1>Конвертация PDF → Excel</h1>
         <p class="sub">
-          Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите файл CSV.<br>
-          Можно просто перетащить файл в область ниже.
+          Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите Excel (.xlsx).<br>
+          Формат: <b>Артикул / ШТ / Площадь</b> (Площадь пустая).
         </p>
 
         <div id="zone" class="zone">
@@ -779,7 +760,7 @@ HOME_HTML = """<!doctype html>
             <input id="file" type="file" accept="application/pdf" hidden />
             <button id="pick" class="btn secondary" type="button">Выбрать PDF</button>
             <button id="go" class="btn primary" type="button" disabled>
-              <span id="goText">Скачать CSV</span>
+              <span id="goText">Скачать Excel</span>
               <span id="spinner" style="display:none">⏳</span>
             </button>
           </div>
@@ -821,7 +802,7 @@ HOME_HTML = """<!doctype html>
     function setBusy(b){
       goBtn.disabled = b || !selectedFile;
       spinner.style.display = b ? 'inline' : 'none';
-      goText.textContent = b ? 'Конвертирую…' : 'Скачать CSV';
+      goText.textContent = b ? 'Конвертирую…' : 'Скачать Excel';
       pickBtn.disabled = b;
       zone.style.pointerEvents = b ? 'none' : 'auto';
       zone.style.opacity = b ? '.85' : '1';
@@ -890,17 +871,16 @@ HOME_HTML = """<!doctype html>
         const a = document.createElement('a');
         a.href = url;
 
-        // имя из Content-Disposition если есть
         const cd = res.headers.get('Content-Disposition') || '';
         const m = /filename="([^"]+)"/i.exec(cd);
-        a.download = m ? m[1] : 'items.csv';
+        a.download = m ? m[1] : 'items.xlsx';
 
         document.body.appendChild(a);
         a.click();
         a.remove();
         window.URL.revokeObjectURL(url);
 
-        setStatus('Готово! CSV скачан.', 'ok');
+        setStatus('Готово! Excel скачан.', 'ok');
         await refreshCounter();
       }catch(e){
         setStatus('Не удалось выполнить запрос. Проверьте интернет/сервер.', 'err');
@@ -925,11 +905,10 @@ HOME_HTML = """<!doctype html>
 """
 
 
-
-
 @app.get("/stats")
 def stats():
-    return {"conversions": get_counter()}
+    # фронт ожидает total
+    return {"total": get_counter()}
 
 
 @app.get("/health")
@@ -939,7 +918,6 @@ def health():
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
         "article_value_column": ARTICLE_VALUE_COLUMN,
-        "category_value": CATEGORY_VALUE,
         "instruction_video_exists": os.path.exists(INSTRUCTION_VIDEO_PATH),
         "conversions": get_counter(),
         "art_xlsx_path": os.getenv("ART_XLSX_PATH", "Art1.xlsx"),
@@ -963,6 +941,12 @@ async def extract(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Загрузите PDF файл (.pdf).")
 
+    if openpyxl is None:
+        raise HTTPException(
+            status_code=500,
+            detail="На сервере не установлен openpyxl. Добавьте openpyxl в requirements.txt и перезадеплойте.",
+        )
+
     pdf_bytes = await file.read()
 
     try:
@@ -981,10 +965,14 @@ async def extract(file: UploadFile = File(...)):
             ),
         )
 
-    csv_bytes = make_csv_excel_friendly(rows)
+    xlsx_bytes = make_xlsx(rows)
     increment_counter()
+
+    base = safe_filename_base(file.filename)
+    out_name = f"{base}.xlsx"
+
     return Response(
-        content=csv_bytes,
-        media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="items.csv"'},
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{out_name}"'},
     )
