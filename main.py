@@ -3,26 +3,28 @@ import os
 import re
 import csv
 from collections import OrderedDict
-from typing import List, Tuple, Dict
-
+from typing import List, Tuple, Dict, Optional
 from urllib.parse import quote
+
 import fitz  # PyMuPDF
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import Response, HTMLResponse, FileResponse
+from fastapi.responses import Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 try:
-    import openpyxl  # requires openpyxl in requirements.txt
+    import openpyxl
     from openpyxl.utils import get_column_letter
 except Exception:
     openpyxl = None
 
 
+# -------------------------
+# App
+# -------------------------
 app = FastAPI()
 
-
 # -------------------------
-# Static / logos
+# Static
 # -------------------------
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 os.makedirs(static_dir, exist_ok=True)
@@ -32,15 +34,12 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 # -------------------------
 # Regex
 # -------------------------
-RX_SIZE = re.compile(r"\b\d{2,}[xх×]\d{2,}(?:[xх×]\d{1,})?\b", re.IGNORECASE)
-RX_MM = re.compile(r"мм", re.IGNORECASE)
-RX_WEIGHT = re.compile(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", re.IGNORECASE)
-
+RX_MONEY_AT_END = re.compile(r"(?P<val>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽\s*$")
 RX_MONEY_LINE = re.compile(r"^\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?\s*₽$")
 RX_INT = re.compile(r"^\d+$")
 RX_ANY_RUB = re.compile(r"₽")
 
-# В одной строке: "... 450 ₽ 1 450 ₽"
+# "price ₽ qty sum ₽" somewhere in line
 RX_PRICE_QTY_SUM = re.compile(
     r"(?P<price>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽\s+"
     r"(?P<qty>\d{1,4})\s+"
@@ -48,22 +47,22 @@ RX_PRICE_QTY_SUM = re.compile(
     re.IGNORECASE,
 )
 
-# После цены иногда PyMuPDF отдает "кол-во + сумма" одной строкой: "8 600 ₽"
+# after price line: "8 600 ₽" in one line
 RX_QTY_SUM_LINE = re.compile(
     r"^(?P<qty>\d{1,4})\s+(?P<sum>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽$",
     re.IGNORECASE,
 )
 
-# Размеры где угодно в строке: "30x10 мм", "600×300 мм" и т.п.
-RX_DIMS_ANYWHERE = re.compile(
-    r"\s*"
-    r"(\b\d{2,}\s*[xх×]\s*\d{2,}(?:\s*[xх×]\s*\d{1,})?\b)"
-    r"\s*",
-    re.IGNORECASE,
-)
+# sizes/weights
+RX_GABARITS_3D = re.compile(r"\b\d{2,}\s*[xх×]\s*\d{2,}\s*[xх×]\s*\d{1,}\b", re.IGNORECASE)
+RX_MM = re.compile(r"\bмм\.?\b", re.IGNORECASE)
+RX_WEIGHT = re.compile(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", re.IGNORECASE)
+
+# size 2D like 60x40 / 60х40 / 60×40 (this is IMPORTANT product variant, do NOT remove globally)
+RX_SIZE_2D_ANY = re.compile(r"\b\d{2,}\s*[xх×]\s*\d{2,}\b", re.IGNORECASE)
 
 RX_HEADER_TOKEN = re.compile(
-    r"^(?:наименование|товар|цена|кол-?во|количество|сумма|итого)\b",
+    r"^(?:фото|товар|габариты|вес|цена\s*за\s*шт|кол-?во|количество|сумма|итого)\b",
     re.IGNORECASE,
 )
 
@@ -75,153 +74,68 @@ RX_TOTALS_BLOCK = re.compile(
     re.IGNORECASE,
 )
 
-RX_PROJECT_TOTAL_ONLY = re.compile(
-    r"^(?:итого(?:\s+по\s+проекту)?)$",
-    re.IGNORECASE,
-)
+RX_PROJECT_TOTAL_ONLY = re.compile(r"^(?:итого(?:\s+по\s+проекту)?)$", re.IGNORECASE)
 
 RX_NOISE = re.compile(
     r"^(?:"
-    r"проект|итого|сумма|итог|всего|итоговая|скидка|доставка|монтаж|"
-    r"страница|лист|дата|номер|тел|e-?mail|адрес|менеджер|клиент|"
-    r"промет|praktik|home|гардеробн|система|"
-    r"кол-?во|количество|цена|стоимость|"
+    r"проект|страница|лист|дата|номер|тел|e-?mail|адрес|менеджер|клиент|"
+    r"промет|praktik-home\.ru|praktik-home|"
     r")\b",
     re.IGNORECASE,
 )
 
 
+# -------------------------
+# Utils
+# -------------------------
 def normalize_space(s: str) -> str:
     s = (s or "").replace("\u00a0", " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
-
-def normalize_key(name: str) -> str:
-    s = normalize_space(name).lower()
-    s = s.replace("ё", "е")
-
-    # unify dashes
-    s = re.sub(r"[–—−]", "-", s)
-
-    # unify multiplication sign: русская 'х' / латинская 'x' / '×' -> 'x'
-    s = s.replace("×", "x").replace("х", "x")
-
-    # remove spaces around x in sizes: "60 x 40" -> "60x40"
-    s = re.sub(r"(\d)\s*x\s*(\d)", r"\1x\2", s)
-
-    # drop quotes
-    s = re.sub(r"[“”«»\"]", "", s)
-
-    # optional: strip dimensions anywhere (keeps matching if размеры отличаются по формату)
-    s = RX_DIMS_ANYWHERE.sub(" ", s)
-
-    s = normalize_space(s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
-def strip_dims_anywhere(name: str) -> str:
-    name = normalize_space(name)
-    name2 = RX_DIMS_ANYWHERE.sub(" ", name)
-    return normalize_space(name2)
-
-
-# -------------------------
-# ID/Артикулы (Art1.xlsx)
-# -------------------------
-def load_article_map() -> Tuple[Dict[str, str], str, str]:
+def normalize_key_keep_size(s: str) -> str:
     """
-    Возвращает:
-      - map: normalized товар -> значение выбранной колонки (по умолчанию "Кастомный ID")
-      - status: строка статуса
-      - used_column: имя столбца, откуда взяли значение
+    Нормализация для ключа маппинга:
+    - ё->е
+    - × / русская х -> x
+    - "60 x 40" -> "60x40"
+    - дефисы унифицируем
+    - пробелы схлопываем
     """
-    if openpyxl is None:
-        return {}, "openpyxl_not_installed", ""
+    s = normalize_space(s).lower()
+    s = s.replace("ё", "е")
+    s = re.sub(r"[–—−]", "-", s)
 
-    # Для БауЦентра по умолчанию Art1.xlsx
-    path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
-    if not os.path.exists(path):
-        return {}, f"file_not_found:{path}", ""
+    # unify x
+    s = s.replace("×", "x").replace("х", "x")
 
-    # Какой столбец брать как "Артикул" в итоговом файле
-    desired_value_col = normalize_space(os.getenv("ART_VALUE_COLUMN", "Кастомный ID"))
+    # remove spaces around x in sizes
+    s = re.sub(r"(\d)\s*x\s*(\d)", r"\1x\2", s)
 
-    try:
-        wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb[wb.sheetnames[0]]
-    except Exception as e:
-        return {}, f"cannot_open:{e}", ""
+    # remove quotes
+    s = re.sub(r"[“”«»\"]", "", s)
 
-    header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
-
-    товар_col = None
-    value_col = None
-
-    for idx, h in enumerate(header, start=1):
-        hl = h.lower()
-        if hl == "товар":
-            товар_col = idx
-        if h == desired_value_col:
-            value_col = idx
-
-    if товар_col is None:
-        товар_col = 1  # fallback
-
-    if value_col is None:
-        # fallback на "Артикул"
-        for idx, h in enumerate(header, start=1):
-            if h.lower() == "артикул":
-                value_col = idx
-                desired_value_col = "Артикул"
-                break
-
-    if value_col is None:
-        return {}, f"bad_header:no колонка '{desired_value_col}' (и fallback 'Артикул')", ""
-
-    m: Dict[str, str] = {}
-    for r in range(2, ws.max_row + 1):
-        товар = ws.cell(r, товар_col).value
-        val = ws.cell(r, value_col).value
-        if not товар or val is None:
-            continue
-
-        # если ID = 0 (числом) — считаем, что ID нет
-        if isinstance(val, (int, float)) and float(val) == 0.0:
-            continue
-
-        товар_s = normalize_space(str(товар))
-        val_s = normalize_space(str(val))
-        if not товар_s or not val_s:
-            continue
-
-        m[normalize_key(товар_s)] = val_s
-
-    return m, "ok", desired_value_col
+    return normalize_space(s)
 
 
-ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN = load_article_map()
+def looks_like_price_marker(line: str) -> bool:
+    """
+    Строка содержит цену за шт в конце:
+      "75.00 ₽"
+      "0.007 кг. 75.00 ₽"
+    """
+    return bool(RX_MONEY_AT_END.search(line or ""))
 
 
-# -------------------------
-# Helpers (noise / totals)
-# -------------------------
 def is_noise(line: str) -> bool:
     if not line:
         return True
     if RX_NOISE.match(line):
         return True
-    if RX_SIZE.search(line) and len(line) <= 20:
-        return True
-    if RX_MM.search(line) and len(line) <= 12:
-        return True
-    if RX_WEIGHT.search(line) and len(line) <= 12:
+    if RX_HEADER_TOKEN.match(line):
         return True
     return False
-
-
-def is_header_token(line: str) -> bool:
-    return bool(RX_HEADER_TOKEN.match(line or ""))
 
 
 def is_totals_block(line: str) -> bool:
@@ -237,6 +151,10 @@ def is_project_total_only(line: str, prev_line: str = "") -> bool:
 
 
 def clean_name_from_buffer(buf: List[str]) -> str:
+    """
+    Склеиваем наименование из буфера до якоря,
+    и чистим хвосты вида ".... 25x2008x25 мм 1.52 кг." если они попали в одну строку.
+    """
     if not buf:
         return ""
 
@@ -249,15 +167,114 @@ def clean_name_from_buffer(buf: List[str]) -> str:
             continue
         if RX_INT.fullmatch(x):
             continue
-        if is_header_token(x):
+        if RX_HEADER_TOKEN.match(x):
             continue
         if x.strip() == "₽":
             continue
         parts.append(x)
 
     name = normalize_space(" ".join(parts))
+
+    # удалить денежный хвост, если вдруг прилип
     name = re.sub(r"\s+\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?\s*₽\s*$", "", name).strip()
+
+    # убрать 3D-габариты + "мм" если прилипли в ту же строку
+    # (например "GS-200 ... 25x2008x25 мм 1.52 кг.")
+    name = re.sub(r"\b\d{2,}\s*[xх×]\s*\d{2,}\s*[xх×]\s*\d{1,}\s*мм\.?\b", "", name, flags=re.IGNORECASE).strip()
+    # убрать вес
+    name = re.sub(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", "", name, flags=re.IGNORECASE).strip()
+    # подчистить двойные пробелы
+    name = normalize_space(name)
+
     return name
+
+
+# -------------------------
+# Art1.xlsx map
+# -------------------------
+def load_article_map() -> Tuple[Dict[str, str], str, str]:
+    """
+    Ожидаем Art1.xlsx рядом/в cwd.
+    По умолчанию берём колонку "Кастомный ID" (как у bau),
+    если нет — fallback на "Артикул".
+    """
+    if openpyxl is None:
+        return {}, "openpyxl_not_installed", ""
+
+    path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
+    if not os.path.exists(path):
+        return {}, f"file_not_found:{path}", ""
+
+    desired_value_col = normalize_space(os.getenv("ART_VALUE_COLUMN", "Кастомный ID"))
+
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+    except Exception as e:
+        return {}, f"cannot_open:{e}", ""
+
+    header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
+
+    товар_col = None
+    value_col = None
+    for idx, h in enumerate(header, start=1):
+        if h.lower() == "товар":
+            товар_col = idx
+        if h == desired_value_col:
+            value_col = idx
+
+    if товар_col is None:
+        товар_col = 1
+
+    if value_col is None:
+        for idx, h in enumerate(header, start=1):
+            if h.lower() == "артикул":
+                value_col = idx
+                desired_value_col = "Артикул"
+                break
+
+    if value_col is None:
+        return {}, f"bad_header:no column '{desired_value_col}' (or fallback 'Артикул')", ""
+
+    m: Dict[str, str] = {}
+    for r in range(2, ws.max_row + 1):
+        товар = ws.cell(r, товар_col).value
+        val = ws.cell(r, value_col).value
+        if not товар or val is None:
+            continue
+
+        # если ID=0 — считаем отсутствующим
+        if isinstance(val, (int, float)) and float(val) == 0.0:
+            continue
+
+        товар_s = normalize_space(str(товар))
+        val_s = normalize_space(str(val))
+        if not товар_s or not val_s:
+            continue
+
+        m[normalize_key_keep_size(товар_s)] = val_s
+
+    return m, "ok", desired_value_col
+
+
+ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN = load_article_map()
+
+
+def map_article(name: str) -> str:
+    """
+    Надёжный поиск ID:
+    1) точный нормализованный
+    2) нормализованный после приведения '60х40/60×40' и '60 x 40' -> '60x40'
+    """
+    k1 = normalize_key_keep_size(name)
+    v = ARTICLE_MAP.get(k1)
+    if v:
+        return v
+
+    # иногда в Art1 "Home" без пробела/с пробелом или лишние пробелы — уже схлопнули,
+    # но на всякий: повтор с normalize_space
+    k2 = normalize_key_keep_size(normalize_space(name))
+    return ARTICLE_MAP.get(k2, "")
 
 
 # -------------------------
@@ -274,14 +291,13 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
         "items_found": 0,
         "anchors_inline": 0,
         "anchors_multiline": 0,
-        "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
+        "article_map_size": len(ARTICLE_MAP),
         "article_value_column": ARTICLE_VALUE_COLUMN,
     }
 
     for page in doc:
         stats["pages"] += 1
-
         txt = page.get_text("text") or ""
         if "₽" not in txt:
             continue
@@ -299,7 +315,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
             line = lines[i]
             prev = lines[i - 1] if i > 0 else ""
 
-            if is_noise(line) or is_header_token(line):
+            if is_noise(line):
                 i += 1
                 continue
 
@@ -313,7 +329,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # A) INLINE anchor
+            # A) Inline: "... 390.00 ₽ 2 780 ₽"
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
@@ -333,13 +349,15 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # B) MULTILINE anchor
-            if RX_MONEY_LINE.fullmatch(line):
-                end = min(len(lines), i + 8)
+            # B) Multiline anchor: line contains price at end (even with weight)
+            if looks_like_price_marker(line):
+                end = min(len(lines), i + 10)
 
-                # 1) Частый кейс: "кол-во + сумма" идут одной строкой (например: "8 600 ₽")
-                qty_idx = None
-                sum_idx = None
+                qty_idx: Optional[int] = None
+                sum_idx: Optional[int] = None
+                qty_val: Optional[int] = None
+
+                # 1) case "8 600 ₽" in one line
                 for j in range(i + 1, end):
                     m_qs = RX_QTY_SUM_LINE.fullmatch(lines[j])
                     if m_qs:
@@ -350,18 +368,21 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                         if 1 <= q <= 500:
                             qty_idx = j
                             sum_idx = j
+                            qty_val = q
                             break
 
-                # 2) Fallback: кол-во отдельной строкой, сумма отдельной строкой
+                # 2) fallback: qty and sum on separate lines
                 if qty_idx is None:
                     for j in range(i + 1, end):
                         if RX_INT.fullmatch(lines[j]):
                             q = int(lines[j])
                             if 1 <= q <= 500:
                                 qty_idx = j
+                                qty_val = q
                                 break
 
                     if qty_idx is None:
+                        # price line but no qty found => treat as part of name buffer
                         buf.append(line)
                         i += 1
                         continue
@@ -379,25 +400,15 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 name = clean_name_from_buffer(buf)
                 buf.clear()
 
-                if name:
-                    if sum_idx == qty_idx:
-                        # qty+sum были в одной строке
-                        m_qs = RX_QTY_SUM_LINE.fullmatch(lines[qty_idx])
-                        try:
-                            qty = int(m_qs.group("qty")) if m_qs else 0
-                        except Exception:
-                            qty = 0
-                    else:
-                        qty = int(lines[qty_idx])
+                if name and qty_val:
+                    ordered[name] = ordered.get(name, 0) + qty_val
+                    stats["items_found"] += 1
+                    stats["anchors_multiline"] += 1
 
-                    if 1 <= qty <= 500:
-                        ordered[name] = ordered.get(name, 0) + qty
-                        stats["items_found"] += 1
-                        stats["anchors_multiline"] += 1
-
-                i = sum_idx + 1
+                i = (sum_idx + 1) if sum_idx is not None else (qty_idx + 1)
                 continue
 
+            # default: accumulate
             buf.append(line)
             i += 1
 
@@ -405,7 +416,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
 
 
 # -------------------------
-# Output: Excel / CSV
+# Output
 # -------------------------
 def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
     if openpyxl is None:
@@ -414,19 +425,15 @@ def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "items"
-
     ws.append(["Артикул", "ШТ", "Площадь"])
 
     for name, qty in rows:
-        article = ARTICLE_MAP.get(normalize_key(name), "")
-        ws.append([article, qty, ""])
+        ws.append([map_article(name), qty, ""])
 
-    # widths
     try:
         widths = [18, 8, 12]
         for col_idx, w in enumerate(widths, start=1):
-            col_letter = get_column_letter(col_idx)
-            ws.column_dimensions[col_letter].width = w
+            ws.column_dimensions[get_column_letter(col_idx)].width = w
     except Exception:
         pass
 
@@ -439,17 +446,16 @@ def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
 def make_csv(rows: List[Tuple[str, int]]) -> bytes:
     output = io.StringIO()
     writer = csv.writer(output, delimiter=";", lineterminator="\n")
-
     writer.writerow(["Артикул", "ШТ", "Площадь"])
+
     for name, qty in rows:
-        article = ARTICLE_MAP.get(normalize_key(name), "")
-        writer.writerow([article, qty, ""])
+        writer.writerow([map_article(name), qty, ""])
 
     return output.getvalue().encode("utf-8-sig")
 
 
 # -------------------------
-# HTML UI
+# UI
 # -------------------------
 INDEX_HTML = r"""
 <!doctype html>
@@ -457,7 +463,7 @@ INDEX_HTML = r"""
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PDF → CSV</title>
+  <title>PDF → CSV / XLSX</title>
   <style>
     :root{
       --bg1:#0f172a;
@@ -486,10 +492,7 @@ INDEX_HTML = r"""
       padding:24px;
     }
     .wrap{width:min(980px, 100%);}
-    .topbar{
-      display:flex; align-items:flex-start; justify-content:space-between;
-      gap:16px; margin-bottom:18px;
-    }
+    .topbar{display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:18px;}
     .brand{display:flex; align-items:center; gap:14px;}
     .brand h1{margin:0; font-size:22px;}
     .brand p{margin:4px 0 0 0; color:var(--muted); font-size:13px;}
@@ -526,8 +529,7 @@ INDEX_HTML = r"""
     }
     .drop input{display:none}
     .btn{
-      cursor:pointer;
-      border: 0;
+      cursor:pointer; border: 0;
       background: linear-gradient(180deg, var(--accent), var(--accent2));
       color:white; font-weight:700;
       padding:10px 14px; border-radius:12px;
@@ -557,8 +559,6 @@ INDEX_HTML = r"""
       padding:10px 12px; border-radius:12px;
       display:none; font-size:13px; white-space:pre-wrap;
     }
-    .footer{margin-top:14px; text-align:center; color:rgba(255,255,255,.55); font-size:12px;}
-    a{color:inherit}
   </style>
 </head>
 <body>
@@ -611,10 +611,6 @@ INDEX_HTML = r"""
           <li>Сопоставляем наименование → ID по Art1.xlsx</li>
           <li>Формируем CSV (; ) или XLSX</li>
         </ul>
-        <div class="footer">
-          <div>Разделитель CSV: <b>;</b></div>
-          <div style="margin-top:6px;">Сервис: <a href="https://pdfcsv.ru/" target="_blank" rel="noreferrer">pdfcsv.ru</a></div>
-        </div>
       </div>
     </div>
   </div>
@@ -633,22 +629,12 @@ INDEX_HTML = r"""
   let currentFile = null;
 
   function setError(msg){
-    if(!msg){
-      errBox.style.display='none';
-      errBox.textContent='';
-      return;
-    }
-    errBox.style.display='block';
-    errBox.textContent=msg;
+    if(!msg){ errBox.style.display='none'; errBox.textContent=''; return; }
+    errBox.style.display='block'; errBox.textContent=msg;
   }
   function setStat(msg){
-    if(!msg){
-      statBox.style.display='none';
-      statBox.textContent='';
-      return;
-    }
-    statBox.style.display='block';
-    statBox.textContent=msg;
+    if(!msg){ statBox.style.display='none'; statBox.textContent=''; return; }
+    statBox.style.display='block'; statBox.textContent=msg;
   }
 
   function setFile(f){
@@ -677,25 +663,15 @@ INDEX_HTML = r"""
   });
 
   function prevent(e){ e.preventDefault(); e.stopPropagation(); }
-
   ['dragenter','dragover'].forEach(ev=>{
-    drop.addEventListener(ev, (e)=>{
-      prevent(e);
-      drop.classList.add('drag');
-    });
+    drop.addEventListener(ev, (e)=>{ prevent(e); drop.classList.add('drag'); });
   });
   ['dragleave','drop'].forEach(ev=>{
-    drop.addEventListener(ev, (e)=>{
-      prevent(e);
-      drop.classList.remove('drag');
-    });
+    drop.addEventListener(ev, (e)=>{ prevent(e); drop.classList.remove('drag'); });
   });
   drop.addEventListener('drop', (e)=>{
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
-    if(f){
-      fileInput.value='';
-      setFile(f);
-    }
+    if(f){ fileInput.value=''; setFile(f); }
   });
 
   async function uploadAndDownload(endpoint){
@@ -709,11 +685,7 @@ INDEX_HTML = r"""
     try{
       const res = await fetch(endpoint, { method:'POST', body: fd });
       const stat = res.headers.get('X-Parse-Stats');
-      if(stat){
-        setStat(decodeURIComponent(stat));
-      } else {
-        setStat('');
-      }
+      if(stat) setStat(decodeURIComponent(stat)); else setStat('');
       if(!res.ok){
         const text = await res.text();
         setError(text || ('Ошибка: ' + res.status));
@@ -726,7 +698,7 @@ INDEX_HTML = r"""
       a.href = url;
       const cd = res.headers.get('Content-Disposition') || '';
       let fn = '';
-      const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+      const m = /filename\\*=UTF-8''([^;]+)/.exec(cd);
       if(m) fn = decodeURIComponent(m[1]);
       a.download = fn || (endpoint.includes('csv') ? 'result.csv' : 'result.xlsx');
       document.body.appendChild(a);
@@ -748,11 +720,7 @@ INDEX_HTML = r"""
     try{
       const res = await fetch('/api/reload-map', { method:'POST' });
       const txt = await res.text();
-      if(!res.ok){
-        setError(txt || ('Ошибка: ' + res.status));
-        setStat('');
-        return;
-      }
+      if(!res.ok){ setError(txt || ('Ошибка: ' + res.status)); setStat(''); return; }
       setStat(txt);
     } catch(err){
       setError('Ошибка сети: ' + err);
@@ -765,6 +733,9 @@ INDEX_HTML = r"""
 """
 
 
+# -------------------------
+# Routes
+# -------------------------
 @app.get("/", response_class=HTMLResponse)
 def index():
     return INDEX_HTML
