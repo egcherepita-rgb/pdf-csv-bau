@@ -7,31 +7,169 @@ from typing import List, Tuple, Dict
 
 from urllib.parse import quote
 import fitz  # PyMuPDF
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import Response, HTMLResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 try:
-    import openpyxl  # requires openpyxl in requirements.txt
-    from openpyxl.utils import get_column_letter
+    import openpyxl
 except Exception:
     openpyxl = None
 
+# -------------------------
+# App
+# -------------------------
+app = FastAPI()
 
-app = FastAPI(title="PDF → Excel (Артикул / ШТ / Площадь)", version="4.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------
-# Static files (logo, etc.)
+# Data / Art1.xlsx map
 # -------------------------
-STATIC_DIR = os.getenv("STATIC_DIR", "static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+ARTICLE_MAP: Dict[str, str] = {}
+ARTICLE_MAP_STATUS = "empty"
+ARTICLE_VALUE_COLUMN = "A"  # default
 
+def normalize_space(s: str) -> str:
+    if s is None:
+        return ""
+    s = s.replace("\u00a0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def normalize_key(s: str) -> str:
+    s = normalize_space(s).lower()
+    s = s.replace("ё", "е")
+    s = re.sub(r"[–—−]", "-", s)
+    s = re.sub(r"[“”«»\"]", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def try_load_article_map() -> None:
+    """
+    Считываем Art1.xlsx, ожидаем:
+      - колонка A: Артикул
+      - колонка B: Наименование
+    """
+    global ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN
+
+    ARTICLE_MAP = {}
+    ARTICLE_MAP_STATUS = "empty"
+    ARTICLE_VALUE_COLUMN = "A"
+
+    # Пытаемся найти Art1.xlsx рядом с main.py, в текущей папке или в /root
+    candidates = [
+        os.path.join(os.path.dirname(__file__), "Art1.xlsx"),
+        os.path.join(os.getcwd(), "Art1.xlsx"),
+        "/root/Art1.xlsx",
+        "/root/app/Art1.xlsx",
+        "/home/app/Art1.xlsx",
+    ]
+
+    xlsx_path = None
+    for c in candidates:
+        if os.path.exists(c):
+            xlsx_path = c
+            break
+
+    if xlsx_path is None:
+        ARTICLE_MAP_STATUS = "Art1.xlsx not found"
+        return
+
+    if openpyxl is None:
+        ARTICLE_MAP_STATUS = "openpyxl not installed"
+        return
+
+    try:
+        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+        ws = wb.active
+
+        # Попробуем автоматически определить колонку с артикулом (A/C/D...) и наименованием (B/...)
+        # Но по умолчанию считаем A=Артикул, B=Наименование
+        # Если в первой строке есть заголовки, попробуем найти по ним.
+        headers = []
+        for cell in ws[1]:
+            headers.append(str(cell.value).strip().lower() if cell.value is not None else "")
+
+        # поиск по заголовкам
+        name_col = None
+        art_col = None
+
+        for idx, h in enumerate(headers, start=1):
+            if h in ("наименование", "товар", "название", "наим."):
+                name_col = idx
+            if h in ("артикул", "код", "id", "sku"):
+                art_col = idx
+
+        if name_col is None:
+            name_col = 2  # B
+        if art_col is None:
+            art_col = 1  # A
+
+        # сохранить букву для инфо
+        ARTICLE_VALUE_COLUMN = openpyxl.utils.get_column_letter(art_col)
+
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if not row:
+                continue
+
+            art = row[art_col - 1] if art_col - 1 < len(row) else None
+            name = row[name_col - 1] if name_col - 1 < len(row) else None
+            if name is None:
+                continue
+
+            name_key = normalize_key(str(name))
+            if not name_key:
+                continue
+
+            art_str = "" if art is None else str(art).strip()
+            ARTICLE_MAP[name_key] = art_str
+
+        ARTICLE_MAP_STATUS = f"loaded: {len(ARTICLE_MAP)} rows from {os.path.basename(xlsx_path)}"
+    except Exception as e:
+        ARTICLE_MAP_STATUS = f"failed to load Art1.xlsx: {e}"
+
+try_load_article_map()
 
 # -------------------------
-# Regex
+# Parsing helpers
 # -------------------------
-RX_SIZE = re.compile(r"\b\d{2,}[xх×]\d{2,}(?:[xх×]\d{1,})?\b", re.IGNORECASE)
+RX_NOISE = re.compile(
+    r"^(?:"
+    r"проект|итого|сумма|итог|всего|итоговая|скидка|доставка|монтаж|"
+    r"страница|лист|дата|номер|тел|e-?mail|адрес|менеджер|клиент|"
+    r"промет|praktik|home|гардеробн|система|"
+    r"кол-?во|количество|цена|стоимость|"
+    r")\b",
+    re.IGNORECASE,
+)
+
+RX_HEADER_TOKEN = re.compile(
+    r"^(?:наименование|товар|цена|кол-?во|количество|сумма|итого)\b",
+    re.IGNORECASE,
+)
+
+RX_TOTALS_BLOCK = re.compile(
+    r"^(?:"
+    r"итого(?:\s+по\s+проекту)?|всего|итоговая\s+стоимость|сумма\s+по\s+проекту|"
+    r"в\s+том\s+числе|ндс|без\s+ндс|налог|итого\s+со\s+скидкой|"
+    r")\b",
+    re.IGNORECASE,
+)
+
+RX_PROJECT_TOTAL_ONLY = re.compile(
+    r"^(?:итого(?:\s+по\s+проекту)?)$",
+    re.IGNORECASE,
+)
+
+# Размеры/маркеры, которые часто встречаются отдельной строкой (шум)
+RX_DIMS = re.compile(r"\b\d{2,}[xх×]\d{2,}(?:[xх×]\d{1,})?\b", re.IGNORECASE)
 RX_MM = re.compile(r"мм", re.IGNORECASE)
 RX_WEIGHT = re.compile(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", re.IGNORECASE)
 
@@ -47,239 +185,82 @@ RX_PRICE_QTY_SUM = re.compile(
     re.IGNORECASE,
 )
 
-# Размеры где угодно в строке: "30x10 мм", "600×300 мм" и т.п.
-RX_DIMS_ANYWHERE = re.compile(
-    r"\s*\d{1,4}[xх×]\d{1,4}(?:[xх×]\d{1,5})?\s*мм\.?\s*",
+# После цены иногда PyMuPDF отдает "кол-во + сумма" одной строкой: "8 600 ₽"
+RX_QTY_SUM_LINE = re.compile(
+    r"^(?P<qty>\d{1,4})\s+(?P<sum>\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*₽$",
     re.IGNORECASE,
 )
 
+# Размеры где угодно в строке: "30x10 мм", "600×300 мм" и т.п.
+RX_DIM_ANYWHERE = re.compile(
+    r"\b\d{2,}\s*[xх×]\s*\d{2,}(?:\s*[xх×]\s*\d{1,})?\b",
+    re.IGNORECASE,
+)
 
-def normalize_space(s: str) -> str:
-    s = (s or "").replace("\u00a0", " ")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
-
-def normalize_key(name: str) -> str:
-    s = normalize_space(name).lower()
-    s = s.replace("×", "x").replace("х", "x")
-    s = RX_DIMS_ANYWHERE.sub(" ", s)
-    s = normalize_space(s)
-    return s
-
-
-def strip_dims_anywhere(name: str) -> str:
-    name = normalize_space(name)
-    name2 = RX_DIMS_ANYWHERE.sub(" ", name)
-    return normalize_space(name2)
-
-
-# -------------------------
-# ID/Артикулы (Art1.xlsx)
-# -------------------------
-def load_article_map() -> Tuple[Dict[str, str], str, str]:
-    """
-    Возвращает:
-      - map: normalized товар -> значение выбранной колонки (по умолчанию "Кастомный ID")
-      - status: строка статуса
-      - used_column: имя столбца, откуда взяли значение
-    """
-    if openpyxl is None:
-        return {}, "openpyxl_not_installed", ""
-
-    # Для БауЦентра по умолчанию Art1.xlsx
-    path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
-    if not os.path.exists(path):
-        return {}, f"file_not_found:{path}", ""
-
-    # Какой столбец брать как "Артикул" в итоговом файле
-    desired_value_col = normalize_space(os.getenv("ART_VALUE_COLUMN", "Кастомный ID"))
-
-    try:
-        wb = openpyxl.load_workbook(path, data_only=True)
-        ws = wb[wb.sheetnames[0]]
-    except Exception as e:
-        return {}, f"cannot_open:{e}", ""
-
-    header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
-
-    товар_col = None
-    value_col = None
-
-    for idx, h in enumerate(header, start=1):
-        hl = h.lower()
-        if hl == "товар":
-            товар_col = idx
-        if h == desired_value_col:
-            value_col = idx
-
-    if товар_col is None:
-        товар_col = 1  # fallback
-
-    if value_col is None:
-        # fallback на "Артикул"
-        for idx, h in enumerate(header, start=1):
-            if h.lower() == "артикул":
-                value_col = idx
-                desired_value_col = "Артикул"
-                break
-
-    if value_col is None:
-        return {}, f"bad_header:no колонка '{desired_value_col}' (и fallback 'Артикул')", ""
-
-    m: Dict[str, str] = {}
-    for r in range(2, ws.max_row + 1):
-        товар = ws.cell(r, товар_col).value
-        val = ws.cell(r, value_col).value
-        if not товар or val is None:
-            continue
-
-        товар_s = normalize_space(str(товар))
-        val_s = normalize_space(str(val))
-        if not товар_s or not val_s:
-            continue
-
-        m[normalize_key(товар_s)] = val_s
-
-    return m, "ok", desired_value_col
-
-
-ARTICLE_MAP, ARTICLE_MAP_STATUS, ARTICLE_VALUE_COLUMN = load_article_map()
-
-# -------------------------
-# Счетчик конвертаций (простое файловое хранилище)
-# -------------------------
-from threading import Lock
-
-COUNTER_FILE = os.getenv("COUNTER_FILE", "conversions.count")
-_counter_lock = Lock()
-
-def _read_counter() -> int:
-    try:
-        with open(COUNTER_FILE, "r", encoding="utf-8") as f:
-            return int((f.read() or "0").strip())
-    except Exception:
-        return 0
-
-def _write_counter(v: int) -> None:
-    tmp = COUNTER_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(str(v))
-    os.replace(tmp, COUNTER_FILE)
-
-def increment_counter() -> int:
-    with _counter_lock:
-        v = _read_counter() + 1
-        _write_counter(v)
-        return v
-
-def get_counter() -> int:
-    return _read_counter()
-
-# Видео-инструкция (положи рядом с main.py)
-INSTRUCTION_VIDEO_PATH = os.getenv("INSTRUCTION_VIDEO_PATH", "instruction.mp4")
-
-
-# -------------------------
-# PDF parsing helpers
-# -------------------------
 def is_noise(line: str) -> bool:
-    low = (line or "").strip().lower()
-    if not low:
+    if not line:
         return True
-    if low.startswith("страница:"):
+    if RX_NOISE.match(line):
         return True
-    if low.startswith("ваш проект"):
+    # отдельные строки типа "600x400", "мм", "2.5 кг" часто попадают как мусор
+    if RX_DIMS.search(line) and len(line) <= 20:
         return True
-    if "проект создан" in low:
+    if RX_MM.search(line) and len(line) <= 12:
         return True
-    if "развертка стены" in low:
-        return True
-    if "стоимость проекта" in low:
+    if RX_WEIGHT.search(line) and len(line) <= 12:
         return True
     return False
-
-
-def is_totals_block(line: str) -> bool:
-    low = (line or "").strip().lower()
-    return (
-        low.startswith("общий вес")
-        or low.startswith("максимальный габарит заказа")
-        or low.startswith("адрес:")
-        or low.startswith("телефон:")
-        or low.startswith("email")
-    )
-
-
-def money_to_number(line: str) -> int:
-    s = normalize_space(line).replace("₽", "").strip()
-    s = s.replace("\u00a0", " ")
-    s = s.replace(" ", "")
-    s = s.replace(",", ".")
-    try:
-        return int(float(s))
-    except Exception:
-        return -1
-
-
-def is_project_total_only(line: str, prev_line: str = "") -> bool:
-    if not RX_MONEY_LINE.fullmatch(normalize_space(line)):
-        return False
-    prev = normalize_space(prev_line).lower()
-    if "стоимость проекта" in prev:
-        return True
-    v = money_to_number(line)
-    return v >= 10000
-
 
 def is_header_token(line: str) -> bool:
-    low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
-    if ("id" in low and "товар" in low and "кол-во" in low and "сумма" in low):
-        return True
-    return low in {"id", "фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма"}
+    return bool(RX_HEADER_TOKEN.match(line or ""))
 
+def is_totals_block(line: str) -> bool:
+    return bool(RX_TOTALS_BLOCK.match(line or ""))
 
-def looks_like_dim_or_weight(line: str) -> bool:
-    if RX_WEIGHT.search(line):
+def is_project_total_only(line: str, prev_line: str = "") -> bool:
+    # когда в таблице встречается "Итого" и ниже идут суммы — считаем это стоп-блоком
+    if RX_PROJECT_TOTAL_ONLY.match(line or ""):
         return True
-    if RX_SIZE.search(line) and RX_MM.search(line):
-        return True
-    return False
-
-
-def looks_like_money_or_qty(line: str) -> bool:
-    if RX_MONEY_LINE.fullmatch(line):
-        return True
-    if RX_INT.fullmatch(line):
+    # иногда "Итого" идет в предыдущей строке
+    if RX_PROJECT_TOTAL_ONLY.match(prev_line or "") and RX_ANY_RUB.search(line or ""):
         return True
     return False
-
 
 def clean_name_from_buffer(buf: List[str]) -> str:
-    filtered = []
-    for ln in buf:
-        if is_noise(ln) or is_header_token(ln) or is_totals_block(ln):
+    """
+    Собираем наименование из буфера до якоря (цена/кол-во/сумма),
+    удаляя хвостовые числовые/денежные куски, если они попали.
+    """
+    if not buf:
+        return ""
+
+    parts: List[str] = []
+    for x in buf:
+        x = normalize_space(x)
+        if not x:
             continue
-        filtered.append(ln)
+        # выкидываем чистые деньги или цифры
+        if RX_MONEY_LINE.fullmatch(x):
+            continue
+        if RX_INT.fullmatch(x):
+            continue
+        # выкидываем элементы заголовка
+        if is_header_token(x):
+            continue
+        # иногда отдельной строкой встречается "₽"
+        if x.strip() == "₽":
+            continue
+        parts.append(x)
 
-    # убираем хвосты
-    while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
-        filtered.pop()
+    name = normalize_space(" ".join(parts))
 
-    name = normalize_space(" ".join(filtered))
+    # удаляем возможный хвост с ценой/суммой
+    name = re.sub(r"\s+\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?\s*₽\s*$", "", name).strip()
 
-    # убираем возможные заголовки и ID в начале
-    name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
-    name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
-    name = re.sub(r"^(?:ID\s*)?\d{6,}\s+", "", name, flags=re.IGNORECASE).strip()
-
-    # убираем габариты внутри строки
-    name = strip_dims_anywhere(name)
     return name
 
-
 # -------------------------
-# Main parser
+# PDF parsing
 # -------------------------
 def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -355,38 +336,63 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
             if RX_MONEY_LINE.fullmatch(line):
                 end = min(len(lines), i + 8)
 
+                # 1) Частый кейс: "кол-во + сумма" идут одной строкой (например: "8 600 ₽")
                 qty_idx = None
+                sum_idx = None
                 for j in range(i + 1, end):
-                    if RX_INT.fullmatch(lines[j]):
-                        q = int(lines[j])
+                    m_qs = RX_QTY_SUM_LINE.fullmatch(lines[j])
+                    if m_qs:
+                        try:
+                            q = int(m_qs.group("qty"))
+                        except Exception:
+                            q = 0
                         if 1 <= q <= 500:
                             qty_idx = j
+                            sum_idx = j
                             break
 
+                # 2) Fallback: кол-во отдельной строкой, сумма отдельной строкой
                 if qty_idx is None:
-                    buf.append(line)
-                    i += 1
-                    continue
+                    for j in range(i + 1, end):
+                        if RX_INT.fullmatch(lines[j]):
+                            q = int(lines[j])
+                            if 1 <= q <= 500:
+                                qty_idx = j
+                                break
 
-                sum_idx = None
-                for j in range(qty_idx + 1, end):
-                    if RX_MONEY_LINE.fullmatch(lines[j]) or RX_ANY_RUB.search(lines[j]):
-                        sum_idx = j
-                        break
+                    if qty_idx is None:
+                        buf.append(line)
+                        i += 1
+                        continue
 
-                if sum_idx is None:
-                    buf.append(line)
-                    i += 1
-                    continue
+                    for j in range(qty_idx + 1, end):
+                        if RX_MONEY_LINE.fullmatch(lines[j]) or RX_ANY_RUB.search(lines[j]):
+                            sum_idx = j
+                            break
+
+                    if sum_idx is None:
+                        buf.append(line)
+                        i += 1
+                        continue
 
                 name = clean_name_from_buffer(buf)
                 buf.clear()
 
                 if name:
-                    qty = int(lines[qty_idx])
-                    ordered[name] = ordered.get(name, 0) + qty
-                    stats["items_found"] += 1
-                    stats["anchors_multiline"] += 1
+                    if sum_idx == qty_idx:
+                        # qty+sum были в одной строке
+                        m_qs = RX_QTY_SUM_LINE.fullmatch(lines[qty_idx])
+                        try:
+                            qty = int(m_qs.group("qty")) if m_qs else 0
+                        except Exception:
+                            qty = 0
+                    else:
+                        qty = int(lines[qty_idx])
+
+                    if 1 <= qty <= 500:
+                        ordered[name] = ordered.get(name, 0) + qty
+                        stats["items_found"] += 1
+                        stats["anchors_multiline"] += 1
 
                 i = sum_idx + 1
                 continue
@@ -436,581 +442,496 @@ def make_xlsx(rows: List[Tuple[str, int]]) -> bytes:
     try:
         widths = [18, 8, 12]
         for col_idx, w in enumerate(widths, start=1):
-            ws.column_dimensions[get_column_letter(col_idx)].width = w
-        ws.freeze_panes = "A2"
+            col_letter = openpyxl.utils.get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].width = w
     except Exception:
         pass
 
     bio = io.BytesIO()
     wb.save(bio)
-    return bio.getvalue()
+    bio.seek(0)
+    return bio.read()
 
-
-def safe_filename_base(filename: str) -> str:
-    base = os.path.splitext(filename or "items")[0]
-    base = base.strip() or "items"
-    # убираем совсем проблемные символы для заголовка Content-Disposition
-    base = re.sub(r'[\\/:*?"<>|]+', "_", base)
-    return base
-
-
-def content_disposition(filename_utf8: str) -> str:
-    """
-    Исправление для кириллицы в имени файла:
-    - filename="..." должен быть ASCII-safe (иначе starlette может пытаться кодировать latin-1 и падать)
-    - filename*=UTF-8''... передаёт реальное имя в UTF-8 (RFC 5987), современные браузеры его понимают
-    """
-    ascii_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename_utf8)
-    if not ascii_name:
-        ascii_name = "items.xlsx"
-    quoted = quote(filename_utf8, safe="")
-    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
 
 # -------------------------
-# UI (Logo + clean page)
+# CSV output (;)
 # -------------------------
-HOME_HTML = """<!doctype html>
+def make_csv(rows: List[Tuple[str, int]]) -> bytes:
+    """
+    CSV; separator=; in Windows-friendly format.
+    Columns:
+      Артикул;ШТ;Площадь
+    """
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=";", lineterminator="\n")
+
+    writer.writerow(["Артикул", "ШТ", "Площадь"])
+    for name, qty in rows:
+        article = ARTICLE_MAP.get(normalize_key(name), "")
+        writer.writerow([article, qty, ""])
+
+    return output.getvalue().encode("utf-8-sig")
+
+
+# -------------------------
+# UI (single-file HTML)
+# -------------------------
+HTML = r"""
+<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>bau.pdfcsv.ru — PDF → Excel</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF → CSV / XLSX</title>
   <style>
     :root{
-      --bg1:#061225;
-      --bg2:#0b2b57;
-      --card:#ffffff;
-      --text:#0b1f3a;
-      --muted:#5f6f86;
-      --stroke:#d7e0ef;
-      --shadow: 0 18px 50px rgba(0,0,0,.22);
-      --brand:#0b4aa2;
-      --brand2:#083a83;
-      --accent:#e41e2b;
-      --ok:#1f9d55;
-      --warn:#d97706;
+      --bg1:#0f172a;
+      --bg2:#111827;
+      --card: rgba(255,255,255,.08);
+      --card2: rgba(255,255,255,.04);
+      --text: rgba(255,255,255,.92);
+      --muted: rgba(255,255,255,.7);
+      --accent: #22c55e;
+      --accent2:#16a34a;
+      --danger:#ef4444;
+      --border: rgba(255,255,255,.15);
     }
-    *{ box-sizing:border-box; }
-    html,body{ height:100%; }
+    *{box-sizing:border-box}
     body{
       margin:0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:var(--text);
+      min-height:100vh;
       background:
-        radial-gradient(900px 500px at 50% 16%, rgba(44,106,202,.55) 0%, rgba(9,33,72,.0) 60%),
-        radial-gradient(1200px 700px at 50% 80%, rgba(10,39,86,.7) 0%, rgba(6,18,37,1) 55%),
-        linear-gradient(180deg, var(--bg2), var(--bg1));
-      color: var(--text);
-      overflow-x:hidden;
-    }
-    body:before{
-      content:"";
-      position:fixed; inset:0;
-      background-image:
-        linear-gradient(to right, rgba(255,255,255,.04) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(255,255,255,.04) 1px, transparent 1px);
-      background-size: 64px 64px;
-      mask-image: radial-gradient(700px 380px at 50% 22%, black 0%, transparent 70%);
-      pointer-events:none;
-      opacity:.65;
+        radial-gradient(1200px 800px at 20% 10%, rgba(34,197,94,.22), transparent 60%),
+        radial-gradient(900px 700px at 85% 30%, rgba(56,189,248,.18), transparent 55%),
+        linear-gradient(145deg, var(--bg1), var(--bg2));
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:24px;
     }
     .wrap{
-      min-height:100%;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      padding: 40px 16px 70px;
+      width:min(980px, 100%);
     }
-    .stack{
-      width:min(860px, 100%);
+    .topbar{
       display:flex;
-      flex-direction:column;
-      align-items:center;
-      gap:14px;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:16px;
+      margin-bottom:18px;
     }
     .brand{
-      width: min(860px, 100%);
+      display:flex;
+      align-items:center;
+      gap:14px;
+    }
+    .brand h1{
+      margin:0;
+      font-size:22px;
+      letter-spacing:.2px;
+    }
+    .brand p{
+      margin:4px 0 0 0;
+      color:var(--muted);
+      font-size:13px;
+    }
+    .logo{
+      width:54px;
+      height:54px;
+      border-radius:14px;
+      background: rgba(255,255,255,.10);
       display:flex;
       align-items:center;
       justify-content:center;
-      padding: 12px 14px;
-      border-radius: 18px;
-      background: linear-gradient(180deg, rgba(11,43,87,.92), rgba(6,18,37,.72));
-      border: 1px solid rgba(255,255,255,.10);
-      box-shadow: 0 18px 40px rgba(0,0,0,.28);
-      backdrop-filter: blur(10px);
-      position:relative;
+      border: 1px solid var(--border);
       overflow:hidden;
     }
-    .brand:before{
-      content:"";
-      position:absolute; inset:0;
-      background:
-        radial-gradient(520px 160px at 50% 0%, rgba(255,255,255,.10) 0%, rgba(255,255,255,0) 70%),
-        linear-gradient(90deg, rgba(228,30,43,.0), rgba(228,30,43,.18), rgba(228,30,43,.0));
-      opacity:.85;
-      pointer-events:none;
-      mix-blend-mode: screen;
-    }
-    .brand img{
-      max-width: 300px;
-      max-height: 82px;
-      object-fit: contain;
+    .logo img{
+      max-width:100%;
+      max-height:100%;
       display:block;
-      filter: drop-shadow(0 10px 18px rgba(0,0,0,.28));
-      position:relative;
     }
-
     .card{
-      width:min(860px,100%);
-      background: var(--card);
-      border-radius: 20px;
-      box-shadow: var(--shadow);
-      padding: 26px 26px 20px;
-      position:relative;
+      background: linear-gradient(180deg, var(--card), var(--card2));
+      border: 1px solid var(--border);
+      border-radius:18px;
+      padding:18px;
+      box-shadow: 0 16px 40px rgba(0,0,0,.35);
     }
-    .card:after{
-      content:"";
-      position:absolute; inset:0;
-      border-radius: 20px;
-      pointer-events:none;
-      border:1px solid rgba(10,30,60,.08);
+    .grid{
+      display:grid;
+      grid-template-columns: 1.25fr .75fr;
+      gap:16px;
     }
-
-    h1{
-      margin:0;
-      font-size: 30px;
-      letter-spacing:.2px;
+    @media (max-width: 860px){
+      .grid{grid-template-columns:1fr}
+      .topbar{flex-direction:column; align-items:flex-start}
+    }
+    .drop{
+      border: 2px dashed rgba(255,255,255,.22);
+      border-radius:16px;
+      padding:18px;
+      min-height:180px;
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      align-items:center;
+      gap:10px;
       text-align:center;
-    }
-    .sub{
-      margin: 8px 0 18px;
-      text-align:center;
-      color: var(--muted);
-      font-size: 14px;
-      line-height:1.45;
-    }
-
-    .zone{
-      border: 2px dashed var(--stroke);
-      border-radius: 18px;
-      padding: 18px;
-      background: linear-gradient(180deg, #fbfcff, #f6f9ff);
       transition: .15s ease;
     }
-    .zone.drag{
-      border-color: rgba(228,30,43,.55);
-      box-shadow: 0 0 0 6px rgba(228,30,43,.10);
+    .drop.drag{
+      border-color: rgba(34,197,94,.8);
+      background: rgba(34,197,94,.08);
+      transform: translateY(-1px);
     }
-    .zone-inner{
-      display:flex;
-      gap:14px;
-      align-items:center;
-      justify-content:center;
-      flex-wrap:wrap;
+    .drop input{display:none}
+    .btn{
+      cursor:pointer;
+      border: 0;
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+      color:white;
+      font-weight:700;
+      padding:10px 14px;
+      border-radius:12px;
+      transition:.15s ease;
+      font-size:14px;
     }
-    .icon{
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      background: rgba(11,74,162,.10);
-      border: 1px solid rgba(228,30,43,.20);
-    }
-    .icon svg{ width:22px; height:22px; }
-    .hint{
-      text-align:center;
-      color: var(--muted);
-      font-size: 14px;
-      margin:0;
-      max-width: 520px;
+    .btn:hover{filter:brightness(1.03)}
+    .btn:active{transform: translateY(1px)}
+    .btn2{
+      background: transparent;
+      border: 1px solid var(--border);
+      color:var(--text);
+      font-weight:600;
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
     }
     .row{
       display:flex;
-      gap:12px;
-      justify-content:center;
-      align-items:center;
-      margin-top: 14px;
-      flex-wrap:wrap;
-    }
-
-    .btn{
-      appearance:none;
-      border:0;
-      border-radius: 12px;
-      padding: 12px 16px;
-      font-weight: 650;
-      cursor:pointer;
-      transition: .15s ease;
-      user-select:none;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
       gap:10px;
-      min-width: 190px;
-      text-decoration:none;
-    }
-    .btn.primary{
-      background: linear-gradient(180deg, var(--brand), var(--brand2));
-      border: 1px solid rgba(255,255,255,.18);
-      color: #fff;
-      box-shadow: 0 12px 22px rgba(30,95,216,.28);
-    }
-    .btn.primary:hover{ transform: translateY(-1px); }
-    .btn.secondary{
-      background:#fff;
-      border:1px solid var(--stroke);
-      color: var(--text);
-    }
-    .btn.secondary:hover{ border-color: rgba(30,95,216,.35); }
-    .btn:disabled{
-      opacity:.55;
-      cursor:not-allowed;
-      transform:none !important;
-      box-shadow:none !important;
-    }
-    .btn:focus{ outline:none; }
-    .btn:focus-visible{
-      box-shadow: 0 0 0 4px rgba(228,30,43,.18), 0 0 0 1px rgba(228,30,43,.55) inset;
-    }
-
-    .fileline{
-      margin-top: 10px;
-      text-align:center;
-      color: var(--muted);
-      font-size: 13px;
-    }
-    .filepill{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      border:1px solid var(--stroke);
-      background: #fff;
-      max-width: 100%;
-    }
-    .filepill b{
-      font-weight: 650;
-      color: var(--text);
-      white-space: nowrap;
-      overflow:hidden;
-      text-overflow: ellipsis;
-      max-width: 520px;
-    }
-
-    .status{
-      margin-top: 14px;
-      font-size: 13px;
-      text-align:center;
-      min-height: 18px;
-    }
-    .status.ok{ color: var(--ok); }
-    .status.err{ color: #b42318; }
-    .status.warn{ color: var(--warn); }
-
-    .footer{
-      margin-top: 18px;
-      display:flex;
-      justify-content:space-between;
-      gap:12px;
-      color: var(--muted);
-      font-size: 12px;
       flex-wrap:wrap;
+      justify-content:center;
     }
-    .footer a{ color: var(--brand2); text-decoration:none; }
-    .footer a:hover{ text-decoration:underline; }
-
-    .counter{
-      position:fixed;
-      right: 16px;
-      bottom: 16px;
-      background: linear-gradient(180deg, rgba(6,32,70,.82), rgba(4,22,50,.76));
-      color:#fff;
-      border: 1px solid rgba(255,255,255,.12);
-      border-radius: 999px;
-      padding: 8px 12px;
-      font-size: 12px;
-      display:flex;
-      align-items:center;
-      gap:8px;
-      backdrop-filter: blur(10px);
-      box-shadow: 0 14px 28px rgba(0,0,0,.25);
+    .muted{color:var(--muted); font-size:13px}
+    .side h3{
+      margin:0 0 10px 0;
+      font-size:16px;
+      letter-spacing:.15px;
     }
-    .dot{
-      width:8px;height:8px;border-radius:99px;
-      background: var(--accent);
-      box-shadow: 0 0 0 4px rgba(228,30,43,.18);
+    .side ul{
+      margin:0;
+      padding-left:18px;
+      color:var(--muted);
+      font-size:13px;
+      line-height:1.55;
     }
-
-    @media (max-width:560px){
-      .brand{ width: 100%; padding: 8px 8px 0; }
-      .card{ padding: 20px 16px 16px; border-radius: 18px; }
-      h1{ font-size: 24px; }
-      .btn{ min-width: 100%; }
-      .filepill b{ max-width: 260px; }
-      .footer{ justify-content:center; text-align:center; }
+    .stat{
+      margin-top:14px;
+      font-size:13px;
+      color:var(--muted);
+      border-top:1px solid var(--border);
+      padding-top:12px;
+      display:none;
+      white-space:pre-wrap;
     }
+    .err{
+      margin-top:12px;
+      color: #fecaca;
+      background: rgba(239,68,68,.12);
+      border: 1px solid rgba(239,68,68,.35);
+      padding:10px 12px;
+      border-radius:12px;
+      display:none;
+      font-size:13px;
+      white-space:pre-wrap;
+    }
+    .footer{
+      margin-top:14px;
+      text-align:center;
+      color:rgba(255,255,255,.55);
+      font-size:12px;
+    }
+    a{color:inherit}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="stack">
+    <div class="topbar">
       <div class="brand">
-        <img src="/static/logo.png" alt="Бауцентр" onerror="this.style.display='none'">
+        <div class="logo">
+          <img src="/static/logo.png" alt="logo" onerror="this.style.display='none'"/>
+        </div>
+        <div>
+          <h1>PDF → CSV / XLSX</h1>
+          <p>Загрузите PDF (из 3D конфигуратора) и скачайте CSV или XLSX</p>
+        </div>
       </div>
 
-      <div class="card">
-        <h1>Конвертация PDF → Excel</h1>
-        <p class="sub">
-          Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите Excel (.xlsx).<br>
-          Формат: <b>Артикул / ШТ / Площадь</b> (Площадь пустая).
-        </p>
+      <div class="row">
+        <button class="btn2" id="reloadMapBtn" title="Перезагрузить Art1.xlsx">Перезагрузить справочник</button>
+      </div>
+    </div>
 
-        <div id="zone" class="zone">
-          <div class="zone-inner">
-            <div class="icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path d="M12 3v10m0-10l-4 4m4-4l4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M4 14v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              </svg>
-            </div>
-            <p class="hint">
-              Перетащите PDF сюда или выберите файл на устройстве.
-            </p>
+    <div class="card grid">
+      <div>
+        <div class="drop" id="drop">
+          <div style="font-size:15px; font-weight:700;">Перетащите PDF сюда</div>
+          <div class="muted">или выберите файл вручную</div>
+          <div class="row" style="margin-top:8px">
+            <label class="btn">
+              Выбрать PDF
+              <input type="file" id="file" accept="application/pdf" />
+            </label>
+            <button class="btn2" id="clearBtn">Очистить</button>
           </div>
-
-          <div class="row">
-            <input id="file" type="file" accept="application/pdf" hidden />
-            <button id="pick" class="btn secondary" type="button">Выбрать PDF</button>
-            <button id="go" class="btn primary" type="button" disabled>
-              <span id="goText">Скачать Excel</span>
-              <span id="spinner" style="display:none">⏳</span>
-            </button>
-          </div>
-
-          <div class="fileline" id="fileline" style="display:none">
-            <span class="filepill">
-              ✅ <span>Файл:</span> <b id="fname"></b>
-            </span>
-          </div>
+          <div class="muted" id="fileName" style="margin-top:6px"></div>
         </div>
 
-        <div id="status" class="status"></div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn" id="csvBtn" disabled>Скачать CSV</button>
+          <button class="btn" id="xlsxBtn" disabled>Скачать XLSX</button>
+        </div>
 
-        <div class="footer" style="justify-content:center"><div><a href="/health" target="_blank" rel="noopener">.</a></div></div>
+        <div class="err" id="err"></div>
+        <div class="stat" id="stat"></div>
+      </div>
+
+      <div class="side">
+        <h3>Как это работает</h3>
+        <ul>
+          <li>Достаём текст из PDF</li>
+          <li>Ищем позиции по якорям «цена → кол-во → сумма»</li>
+          <li>Сопоставляем наименование → артикул по Art1.xlsx</li>
+          <li>Формируем CSV (; ) или XLSX</li>
+        </ul>
+        <div class="footer">
+          <div>Разделитель CSV: <b>;</b> (удобно для Excel)</div>
+          <div style="margin-top:6px;">Сервис: <a href="https://pdfcsv.ru/" target="_blank" rel="noreferrer">pdfcsv.ru</a></div>
+        </div>
       </div>
     </div>
   </div>
 
-  <div class="counter"><span class="dot"></span><span id="count">Конвертаций: …</span></div>
+<script>
+  const fileInput = document.getElementById('file');
+  const drop = document.getElementById('drop');
+  const fileName = document.getElementById('fileName');
+  const csvBtn = document.getElementById('csvBtn');
+  const xlsxBtn = document.getElementById('xlsxBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const errBox = document.getElementById('err');
+  const statBox = document.getElementById('stat');
+  const reloadMapBtn = document.getElementById('reloadMapBtn');
 
-  <script>
-    const zone = document.getElementById('zone');
-    const fileInput = document.getElementById('file');
-    const pickBtn = document.getElementById('pick');
-    const goBtn = document.getElementById('go');
-    const goText = document.getElementById('goText');
-    const spinner = document.getElementById('spinner');
-    const statusEl = document.getElementById('status');
-    const fileline = document.getElementById('fileline');
-    const fname = document.getElementById('fname');
+  let currentFile = null;
 
-    let selectedFile = null;
-
-    function setStatus(msg, cls){
-      statusEl.className = 'status ' + (cls || '');
-      statusEl.textContent = msg || '';
+  function setError(msg){
+    if(!msg){
+      errBox.style.display='none';
+      errBox.textContent='';
+      return;
     }
-
-    function setBusy(b){
-      goBtn.disabled = b || !selectedFile;
-      spinner.style.display = b ? 'inline' : 'none';
-      goText.textContent = b ? 'Конвертирую…' : 'Скачать Excel';
-      pickBtn.disabled = b;
-      zone.style.pointerEvents = b ? 'none' : 'auto';
-      zone.style.opacity = b ? '.85' : '1';
+    errBox.style.display='block';
+    errBox.textContent=msg;
+  }
+  function setStat(msg){
+    if(!msg){
+      statBox.style.display='none';
+      statBox.textContent='';
+      return;
     }
+    statBox.style.display='block';
+    statBox.textContent=msg;
+  }
 
-    function setFile(f){
-      selectedFile = f;
-      if (f){
-        fname.textContent = f.name;
-        fileline.style.display = 'block';
-        goBtn.disabled = false;
-        setStatus('', '');
-      }else{
-        fileline.style.display = 'none';
-        goBtn.disabled = true;
+  function setFile(f){
+    currentFile = f;
+    if(f){
+      fileName.textContent = f.name;
+      csvBtn.disabled = false;
+      xlsxBtn.disabled = false;
+    } else {
+      fileName.textContent = '';
+      csvBtn.disabled = true;
+      xlsxBtn.disabled = true;
+      setError('');
+      setStat('');
+    }
+  }
+
+  fileInput.addEventListener('change', (e)=>{
+    const f = e.target.files && e.target.files[0];
+    setFile(f || null);
+  });
+
+  clearBtn.addEventListener('click', ()=>{
+    fileInput.value='';
+    setFile(null);
+  });
+
+  function prevent(e){ e.preventDefault(); e.stopPropagation(); }
+
+  ['dragenter','dragover'].forEach(ev=>{
+    drop.addEventListener(ev, (e)=>{
+      prevent(e);
+      drop.classList.add('drag');
+    });
+  });
+  ['dragleave','drop'].forEach(ev=>{
+    drop.addEventListener(ev, (e)=>{
+      prevent(e);
+      drop.classList.remove('drag');
+    });
+  });
+  drop.addEventListener('drop', (e)=>{
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(f){
+      fileInput.value='';
+      setFile(f);
+    }
+  });
+
+  async function uploadAndDownload(endpoint){
+    if(!currentFile) return;
+    setError('');
+    setStat('Обработка...');
+
+    const fd = new FormData();
+    fd.append('file', currentFile);
+
+    try{
+      const res = await fetch(endpoint, { method:'POST', body: fd });
+      const stat = res.headers.get('X-Parse-Stats');
+      if(stat){
+        setStat(decodeURIComponent(stat));
+      } else {
+        setStat('');
       }
-    }
-
-    pickBtn.addEventListener('click', () => fileInput.click());
-
-    fileInput.addEventListener('change', () => {
-      const f = fileInput.files && fileInput.files[0];
-      if (f) setFile(f);
-    });
-
-    ['dragenter','dragover'].forEach(evt => {
-      zone.addEventListener(evt, (e) => {
-        e.preventDefault(); e.stopPropagation();
-        zone.classList.add('drag');
-      });
-    });
-    ['dragleave','drop'].forEach(evt => {
-      zone.addEventListener(evt, (e) => {
-        e.preventDefault(); e.stopPropagation();
-        zone.classList.remove('drag');
-      });
-    });
-    zone.addEventListener('drop', (e) => {
-      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) setFile(f);
-    });
-
-    goBtn.addEventListener('click', async () => {
-      if (!selectedFile) return;
-      setBusy(true);
-      setStatus('', '');
-
-      try{
-        const fd = new FormData();
-        fd.append('file', selectedFile, selectedFile.name);
-
-        const res = await fetch('/extract', { method:'POST', body: fd });
-        if (!res.ok){
-          let msg = 'Ошибка конвертации';
-          try{
-            const j = await res.json();
-            msg = (j && j.detail) ? j.detail : msg;
-          }catch(_){}
-          setStatus(msg, 'err');
-          setBusy(false);
-          return;
-        }
-
-        const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-
-        const cd = res.headers.get('Content-Disposition') || '';
-
-        // 1) Пробуем filename*=UTF-8''... (правильное имя, включая кириллицу)
-        let filename = null;
-        const mStar = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(cd);
-        if (mStar && mStar[1]) {
-          try { filename = decodeURIComponent(mStar[1]); } catch (e) { filename = mStar[1]; }
-        }
-
-        // 2) Fallback на обычный filename="..." (ASCII-safe)
-        if (!filename) {
-          const m = /filename="([^"]+)"/i.exec(cd);
-          if (m && m[1]) filename = m[1];
-        }
-
-        a.download = filename || 'items.xlsx';
-
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        window.URL.revokeObjectURL(url);
-
-        setStatus('Готово! Excel скачан.', 'ok');
-        await refreshCounter();
-      }catch(e){
-        setStatus('Не удалось выполнить запрос. Проверьте интернет/сервер.', 'err');
-      }finally{
-        setBusy(false);
+      if(!res.ok){
+        const text = await res.text();
+        setError(text || ('Ошибка: ' + res.status));
+        return;
       }
-    });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
 
-    async function refreshCounter(){
-      try{
-        const r = await fetch('/stats');
-        const j = await r.json();
-        if (j && typeof j.total === 'number'){
-          document.getElementById('count').textContent = 'Конвертаций: ' + j.total;
-        }
-      }catch(_){}
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = res.headers.get('Content-Disposition') || '';
+      let fn = '';
+      const m = /filename\\*=UTF-8''([^;]+)/.exec(cd);
+      if(m) fn = decodeURIComponent(m[1]);
+      a.download = fn || (endpoint.includes('csv') ? 'result.csv' : 'result.xlsx');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch(err){
+      setError('Ошибка сети: ' + err);
+      setStat('');
     }
-    refreshCounter();
-  </script>
+  }
+
+  csvBtn.addEventListener('click', ()=>uploadAndDownload('/api/convert/csv'));
+  xlsxBtn.addEventListener('click', ()=>uploadAndDownload('/api/convert/xlsx'));
+
+  reloadMapBtn.addEventListener('click', async ()=>{
+    setError('');
+    setStat('Перезагрузка справочника...');
+    try{
+      const res = await fetch('/api/reload-map', { method:'POST' });
+      const txt = await res.text();
+      if(!res.ok){
+        setError(txt || ('Ошибка: ' + res.status));
+        setStat('');
+        return;
+      }
+      setStat(txt);
+    } catch(err){
+      setError('Ошибка сети: ' + err);
+      setStat('');
+    }
+  });
+</script>
 </body>
 </html>
 """
 
 
-@app.get("/stats")
-def stats():
-    # фронт ожидает total
-    return {"total": get_counter()}
+# -------------------------
+# Static (logos)
+# -------------------------
+from fastapi.staticfiles import StaticFiles
+
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if not os.path.exists(static_dir):
+    # на всякий случай — создадим пустую папку, чтобы mount не падал
+    os.makedirs(static_dir, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "article_map_size": len(ARTICLE_MAP),
-        "article_map_status": ARTICLE_MAP_STATUS,
-        "article_value_column": ARTICLE_VALUE_COLUMN,
-        "instruction_video_exists": os.path.exists(INSTRUCTION_VIDEO_PATH),
-        "conversions": get_counter(),
-        "art_xlsx_path": os.getenv("ART_XLSX_PATH", "Art1.xlsx"),
-    }
+# -------------------------
+# Routes
+# -------------------------
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return HTML
 
+@app.post("/api/reload-map")
+def reload_map():
+    try_load_article_map()
+    return f"{ARTICLE_MAP_STATUS}. value column: {ARTICLE_VALUE_COLUMN}"
 
-@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
-def home():
-    return HOME_HTML
-
-
-@app.get("/instruction.mp4")
-def instruction_video():
-    if not os.path.exists(INSTRUCTION_VIDEO_PATH):
-        raise HTTPException(status_code=404, detail="instruction.mp4 not found")
-    return FileResponse(INSTRUCTION_VIDEO_PATH, media_type="video/mp4")
-
-
-@app.post("/extract")
-async def extract(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Загрузите PDF файл (.pdf).")
-
-    if openpyxl is None:
-        raise HTTPException(
-            status_code=500,
-            detail="На сервере не установлен openpyxl. Добавьте openpyxl в requirements.txt и перезадеплойте.",
-        )
-
+@app.post("/api/convert/csv")
+async def convert_csv(file: UploadFile = File(...)):
     pdf_bytes = await file.read()
+    rows, stats = parse_items(pdf_bytes)
 
-    try:
-        rows, stats = parse_items(pdf_bytes)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Не удалось распарсить PDF: {e}")
+    data = make_csv(rows)
 
-    if not rows:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Не удалось найти позиции. Поддерживаемые якоря:\n"
-                "1) в одной строке: price ₽ qty sum ₽\n"
-                "2) в разных строках: price ₽ -> qty -> sum ₽\n"
-                f"debug={stats}"
-            ),
-        )
+    stats_str = (
+        f"pages={stats.get('pages')}\\n"
+        f"items_found={stats.get('items_found')}\\n"
+        f"anchors_inline={stats.get('anchors_inline')}\\n"
+        f"anchors_multiline={stats.get('anchors_multiline')}\\n"
+        f"article_map_status={stats.get('article_map_status')}\\n"
+        f"article_map_size={stats.get('article_map_size')}\\n"
+        f"article_value_column={stats.get('article_value_column')}\\n"
+    )
 
-    xlsx_bytes = make_xlsx(rows)
-    increment_counter()
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote('result.csv')}",
+        "X-Parse-Stats": quote(stats_str),
+    }
+    return StreamingResponse(io.BytesIO(data), media_type="text/csv", headers=headers)
 
-    base = safe_filename_base(file.filename)
-    out_name = f"{base}.xlsx"
+@app.post("/api/convert/xlsx")
+async def convert_xlsx(file: UploadFile = File(...)):
+    pdf_bytes = await file.read()
+    rows, stats = parse_items(pdf_bytes)
 
-    return Response(
-        content=xlsx_bytes,
+    data = make_xlsx(rows)
+
+    stats_str = (
+        f"pages={stats.get('pages')}\\n"
+        f"items_found={stats.get('items_found')}\\n"
+        f"anchors_inline={stats.get('anchors_inline')}\\n"
+        f"anchors_multiline={stats.get('anchors_multiline')}\\n"
+        f"article_map_status={stats.get('article_map_status')}\\n"
+        f"article_map_size={stats.get('article_map_size')}\\n"
+        f"article_value_column={stats.get('article_value_column')}\\n"
+    )
+
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote('result.xlsx')}",
+        "X-Parse-Stats": quote(stats_str),
+    }
+    return StreamingResponse(
+        io.BytesIO(data),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": content_disposition(out_name)},
+        headers=headers,
     )
