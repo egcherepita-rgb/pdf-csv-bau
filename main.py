@@ -90,7 +90,6 @@ def strip_dims_mm_anywhere(name: str) -> str:
 
 # -------------------------
 # PDF helpers (from main(2).py spirit)
-# -------------------------
 def is_noise(line: str) -> bool:
     low = (line or "").strip().lower()
     if not low:
@@ -119,6 +118,28 @@ def is_totals_block(line: str) -> bool:
     )
 
 
+def money_to_number(line: str) -> int:
+    s = normalize_space(line).replace("₽", "").strip()
+    s = s.replace("\u00a0", " ")
+    s = s.replace(" ", "")
+    s = s.replace(",", ".")
+    try:
+        return int(float(s))
+    except Exception:
+        return -1
+
+
+def is_project_total_only(line: str, prev_line: str = "") -> bool:
+    # Lone money line after "Стоимость проекта:" OR huge money line (project total) — skip it as an item anchor
+    if not RX_MONEY_LINE.fullmatch(normalize_space(line)):
+        return False
+    prev = normalize_space(prev_line).lower()
+    if "стоимость проекта" in prev:
+        return True
+    v = money_to_number(line)
+    return v >= 10000
+
+
 def is_header_token(line: str) -> bool:
     low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
     return low in {"фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма", "итого"}
@@ -145,9 +166,8 @@ def clean_name_from_buffer(buf: List[str]) -> str:
     for ln in buf:
         if is_noise(ln) or is_header_token(ln) or is_totals_block(ln):
             continue
-        filtered.append(normalize_space(ln))
+        filtered.append(ln)
 
-    # pop trailing dim/weight/money/qty lines
     while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
         filtered.pop()
 
@@ -155,10 +175,9 @@ def clean_name_from_buffer(buf: List[str]) -> str:
     name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
     name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
 
-    # remove only gabarits with мм, keep 60х40
+    # remove only gabarits with "мм" (keeps 60х40 / 90х40)
     name = strip_dims_mm_anywhere(name)
     return name
-
 
 # -------------------------
 # Art1.xlsx map (Товар / Артикул)
@@ -219,12 +238,15 @@ def map_article(name: str) -> str:
 # -------------------------
 def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = doc.page_count
 
     ordered: "OrderedDict[str, int]" = OrderedDict()
     buf: List[str] = []
 
     stats = {
         "pages": 0,
+        "total_pages": total_pages,
+        "processed_pages": 0,
         "items_found": 0,
         "anchors_inline": 0,
         "anchors_multiline": 0,
@@ -236,6 +258,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
 
     for page in doc:
         stats["pages"] += 1
+        stats["processed_pages"] += 1
 
         txt = page.get_text("text") or ""
         if "₽" not in txt:
@@ -258,7 +281,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            if is_totals_block(line):
+            if is_project_total_only(line, prev_line=prev) or is_totals_block(line):
                 in_totals = True
                 buf.clear()
                 i += 1
@@ -268,7 +291,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 i += 1
                 continue
 
-            # A) INLINE anchor
+            # A) INLINE anchor: "... 390.00 ₽ 2 780 ₽"
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
@@ -289,7 +312,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                 continue
 
             # B1) qty+sum in one line right after any price-containing line
-            # Example after "… 75.00 ₽" sometimes comes "8 600 ₽"
+            # Example: after "… 75.00 ₽" sometimes comes "8 600 ₽"
             if RX_ANY_RUB.search(line):
                 if i + 1 < len(lines):
                     mqs = RX_QTY_SUM_LINE.fullmatch(lines[i + 1])
@@ -308,7 +331,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                             i += 2
                             continue
 
-            # C) EMBEDDED price anchor (as in main(2).py):
+            # C) EMBEDDED price anchor:
             # line contains ₽ (even if not "money-only"), next lines are qty and sum
             if RX_ANY_RUB.search(line):
                 if i + 2 < len(lines) and RX_INT.fullmatch(lines[i + 1]) and RX_MONEY_LINE.fullmatch(lines[i + 2]):
@@ -316,13 +339,16 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int]], Dict]:
                         qty = int(lines[i + 1])
                     except Exception:
                         qty = 0
+
                     if 1 <= qty <= 500:
                         name = clean_name_from_buffer(buf + [line])
                         buf.clear()
+
                         if name:
                             ordered[name] = ordered.get(name, 0) + qty
                             stats["items_found"] += 1
                             stats["anchors_embedded"] += 1
+
                     i += 3
                     continue
 
