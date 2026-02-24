@@ -1,3 +1,4 @@
+
 import io
 import os
 import re
@@ -348,7 +349,8 @@ def make_xlsx_bau(rows: List[Tuple[str, int]]) -> bytes:
 
     for name, qty in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
-        ws.append([_to_int_if_digits(art) if art else "", int(qty), ""])  # площадь пустая
+        art_out = _to_int_if_digits(art) if art else "НЕ ЗАВЕДЕН"
+        ws.append([art_out, int(qty), ""])  # площадь пустая
 
     # Немного удобства: ширина колонок
     ws.column_dimensions["A"].width = 16
@@ -522,168 +524,250 @@ HOME_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PDF → XLSX (Бауцентр)</title>
+  <title>Бауцентр — Конвертация PDF → Excel</title>
   <style>
-    :root { --bg:#0b0f17; --card:#121a2a; --text:#e9eefc; --muted:#a8b3d6; --border:rgba(255,255,255,.08); --btn:#4f7cff; }
-    html, body { height: 100%; overflow: hidden; }
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
+    :root{
+      --bg1:#0b1833;
+      --bg2:#071126;
+      --card:#ffffff;
+      --text:#111827;
+      --muted:#6b7280;
+      --border:#e5e7eb;
+      --blue:#3b82f6;
+      --blue2:#2563eb;
+      --shadow: 0 24px 70px rgba(0,0,0,.35);
+    }
+    html,body{height:100%; overflow:hidden;}
+    *{box-sizing:border-box;}
+    body{
       margin:0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 20% 10%, #18234a 0%, var(--bg) 55%);
+      font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      background:
+        radial-gradient(1100px 700px at 50% 18%, #153a77 0%, rgba(21,58,119,0) 60%),
+        radial-gradient(900px 600px at 20% 20%, rgba(59,130,246,.30) 0%, rgba(59,130,246,0) 65%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding: 34px 18px;
       color: var(--text);
     }
-    .hero {
+
+    .top-pill{
       position: fixed;
-      top: 22px;
-      left: 0;
-      width: 100%;
-      text-align: center;
-      z-index: 5;
-      pointer-events: none;
-    }
-    .hero-title {
-      font-weight: 900;
-      letter-spacing: .6px;
-      font-size: clamp(24px, 3.5vw, 44px);
-      margin: 0;
-    }
-    .hero-logo {
-      margin-top: 12px;
-      height: 56px;
-      width: auto;
-      opacity: .95;
-    }
-    .wrap {
-      height: 100vh;
+      top: 28px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,255,255,.10);
+      border: 1px solid rgba(255,255,255,.14);
+      backdrop-filter: blur(10px);
+      border-radius: 16px;
+      padding: 10px 18px;
       display:flex;
       align-items:center;
-      justify-content:center;
-      padding: 28px;
-      padding-top: 170px;
-    }
-    .card {
-      width:min(900px, 100%);
-      background: rgba(18,26,42,.92);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 22px;
-      box-shadow: 0 18px 60px rgba(0,0,0,.45);
-    }
-    h1 { margin:0; font-size: 22px; letter-spacing: .2px; }
-    .hint { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
-    .row {
-      margin-top: 18px;
-      display:flex;
-      gap: 12px;
-      align-items:center;
-      justify-content:center;
-      flex-wrap:wrap;
-      width: 100%;
-    }
-    .file {
-      display:flex;
-      align-items:center;
-      justify-content:center;
       gap:10px;
-      padding: 10px 12px;
-      border: 1px dashed var(--border);
-      border-radius: 14px;
-      background: rgba(255,255,255,.02);
+      color:#fff;
+      box-shadow: 0 10px 30px rgba(0,0,0,.25);
     }
-    button {
-      padding: 10px 14px;
-      border: 0;
+    .top-pill img{ height: 22px; width:auto; display:block; }
+    .top-pill .brand{ font-weight: 800; letter-spacing:.2px; }
+
+    .card{
+      width: min(760px, 100%);
+      background: var(--card);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      padding: 34px 34px 28px;
+      text-align:center;
+    }
+    .title{
+      font-size: 22px;
+      font-weight: 900;
+      margin: 6px 0 6px;
+    }
+    .subtitle{
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .subtitle b{ color:#374151; }
+
+    .drop{
+      border: 1.5px dashed var(--border);
       border-radius: 14px;
-      cursor: pointer;
+      padding: 22px 18px;
+      background: #f8fafc;
+    }
+    .drop .mini{
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 6px;
+    }
+    .icon{
+      width: 34px;
+      height: 34px;
+      margin: 0 auto 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:#fff;
+    }
+    .icon svg{ width:18px; height:18px; }
+
+    .controls{
+      margin-top: 14px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .btn{
+      appearance:none;
+      border: 1px solid var(--border);
+      background: #fff;
+      color:#111827;
+      padding: 10px 16px;
+      border-radius: 12px;
       font-weight: 800;
-      background: var(--btn);
-      color: #0b1020;
+      cursor:pointer;
+      box-shadow: 0 6px 18px rgba(17,24,39,.06);
     }
-    button:disabled { opacity: .55; cursor:not-allowed; }
-    .status { margin-top: 14px; font-size: 14px; color: var(--muted); white-space: pre-wrap; text-align:center; }
-    .status.ok { color: #79ffa8; }
-    .status.err { color: #ff7b8a; }
-    .tiny { margin-top: 12px; text-align:center; color: var(--muted); font-size: 12px; }
+    .btn.primary{
+      border-color: rgba(37,99,235,.25);
+      background: linear-gradient(180deg, var(--blue), var(--blue2));
+      color:#fff;
+      box-shadow: 0 10px 22px rgba(37,99,235,.25);
+    }
+    .btn:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+      box-shadow:none;
+    }
+
+    .status{
+      margin-top: 14px;
+      font-size: 13px;
+      color: var(--muted);
+      white-space: pre-wrap;
+    }
+    .status.ok{ color:#0f766e; }
+    .status.err{ color:#b91c1c; }
+    input[type="file"]{ display:none; }
   </style>
 </head>
 <body>
-  <div class="hero">
-    <h1 class="hero-title">PDF → XLSX (Бауцентр)</h1>
-    <img class="hero-logo" src="/static/logo.png" alt="logo" />
+  <div class="top-pill">
+    <img src="/static/logo.png" alt="Бауцентр" />
+    <div class="brand">Бауцентр</div>
   </div>
 
-  <div class="wrap">
-    <div class="card">
-      <h1>Загрузите PDF со спецификацией</h1>
-      <div class="hint">На выходе: XLSX с колонками <b>Артикул</b>, <b>ШТ</b>, <b>Площадь</b> (пустая).</div>
+  <div class="card">
+    <div class="title">Конвертация PDF → Excel</div>
+    <div class="subtitle">
+      Загрузите PDF (отчёт/корзина из 3D конфигуратора) — получите Excel (.xlsx).<br/>
+      Формат: <b>Артикул</b> / <b>ШТ</b> / <b>Площадь</b> (Площадь пустая).
+    </div>
 
-      <div class="row">
-        <div class="file">
-          <input id="file" type="file" accept="application/pdf" />
-        </div>
-        <button id="btn" disabled>Конвертировать</button>
+    <div class="drop">
+      <div class="icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M12 3v10m0-10 4 4m-4-4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M4 15v3a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
       </div>
 
-      <div id="status" class="status"></div>
-      <div class="tiny">Если сервис не видит позиции — проверьте, что в PDF есть цены/кол-во/сумма (₽).</div>
+      <div class="mini" id="fileName">Перетащите PDF сюда или выберите файл на устройстве.</div>
+
+      <div class="controls">
+        <label class="btn" for="pdfInput">Выбрать PDF</label>
+        <button class="btn primary" id="downloadBtn" disabled>Скачать Excel</button>
+      </div>
+      <input id="pdfInput" type="file" accept="application/pdf" />
     </div>
+
+    <div class="status" id="status"></div>
   </div>
 
 <script>
-const fileEl = document.getElementById('file');
-const btn = document.getElementById('btn');
-const statusEl = document.getElementById('status');
+(function(){
+  const input = document.getElementById('pdfInput');
+  const status = document.getElementById('status');
+  const fileName = document.getElementById('fileName');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const drop = document.querySelector('.drop');
 
-fileEl.addEventListener('change', () => {
-  btn.disabled = !fileEl.files || fileEl.files.length === 0;
-});
+  let jobId = null;
 
-function setStatus(text, cls='') {
-  statusEl.className = 'status ' + cls;
-  statusEl.textContent = text;
-}
+  function setStatus(text, cls){
+    status.className = 'status' + (cls ? (' ' + cls) : '');
+    status.textContent = text || '';
+  }
 
-async function poll(jobId) {
-  while (true) {
-    const r = await fetch('/job/' + jobId);
+  async function poll(){
+    if(!jobId) return;
+    try{
+      const r = await fetch('/job/' + jobId);
+      const j = await r.json();
+      if(j.status === 'done'){
+        setStatus('Готово. Можно скачать Excel.', 'ok');
+        downloadBtn.disabled = false;
+        downloadBtn.onclick = () => { window.location.href = '/download/' + jobId; };
+        return;
+      }
+      if(j.status === 'error'){
+        setStatus(j.error || 'Ошибка обработки.', 'err');
+        jobId = null;
+        return;
+      }
+      setStatus(j.message || 'Обработка…');
+      setTimeout(poll, 400);
+    }catch(e){
+      setStatus('Ошибка связи с сервером.', 'err');
+    }
+  }
+
+  async function start(file){
+    if(!file) return;
+    downloadBtn.disabled = true;
+    downloadBtn.onclick = null;
+    setStatus('Загрузка…');
+    fileName.textContent = file.name;
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    const r = await fetch('/extract', { method:'POST', body: fd });
+    if(!r.ok){
+      const t = await r.text();
+      setStatus(t || 'Ошибка загрузки.', 'err');
+      return;
+    }
     const j = await r.json();
-    if (j.status === 'done') {
-      setStatus('Готово. Скачиваю файл…', 'ok');
-      window.location = '/download/' + jobId;
-      return;
-    }
-    if (j.status === 'error') {
-      setStatus('Ошибка: ' + (j.message || 'неизвестно'), 'err');
-      return;
-    }
-    const p = j.processed_pages || 0;
-    const t = j.total_pages || 0;
-    setStatus((j.message || 'Обработка…') + (t ? ` (${p}/${t})` : ''), '');
-    await new Promise(res => setTimeout(res, 400));
+    jobId = j.job_id;
+    setStatus('Обработка…');
+    poll();
   }
-}
 
-btn.addEventListener('click', async () => {
-  if (!fileEl.files || fileEl.files.length === 0) return;
-  btn.disabled = true;
-  setStatus('Загрузка…');
+  input.addEventListener('change', (e)=> start(e.target.files && e.target.files[0]));
 
-  const fd = new FormData();
-  fd.append('file', fileEl.files[0]);
-
-  const r = await fetch('/extract_async', { method: 'POST', body: fd });
-  if (!r.ok) {
-    const txt = await r.text();
-    setStatus('Ошибка: ' + txt, 'err');
-    btn.disabled = false;
-    return;
-  }
-  const j = await r.json();
-  setStatus('Обработка…');
-  await poll(j.job_id);
-  btn.disabled = false;
-});
+  // drag & drop
+  ['dragenter','dragover'].forEach(evt => drop.addEventListener(evt, (e)=>{
+    e.preventDefault(); e.stopPropagation();
+    drop.style.background = '#eef2ff';
+  }));
+  ['dragleave','drop'].forEach(evt => drop.addEventListener(evt, (e)=>{
+    e.preventDefault(); e.stopPropagation();
+    drop.style.background = '#f8fafc';
+  }));
+  drop.addEventListener('drop', (e)=>{
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if(f) start(f);
+  });
+})();
 </script>
 </body>
 </html>
