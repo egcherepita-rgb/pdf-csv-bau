@@ -518,7 +518,7 @@ HTML_PAGE = r"""<!doctype html>
         return;
       }
       const j = await r.json();
-      if(j.status === 'pending'){
+      if(j.status === 'pending' || j.status === 'processing'){
         await new Promise(res => setTimeout(res, 450));
         continue;
       }
@@ -605,28 +605,44 @@ async def extract_async(file: UploadFile = File(...)):
         JOBS[job_id] = Job(status="pending", created_at=time.time(), filename="bau.xlsx")
 
     pdf_bytes = await file.read()
+    print(f"[bau] received PDF bytes={len(pdf_bytes)} job_id={job_id}", flush=True)
 
     def work():
         try:
+            with JOBS_LOCK:
+                j = JOBS.get(job_id)
+                if j:
+                    j.status = "processing"
+            print(f"[bau] processing job_id={job_id}", flush=True)
             article_map = load_article_map(ART_XLSX_PATH)
             lines = extract_lines_from_pdf(pdf_bytes)
             items = parse_items_from_lines(lines)
+            print(f"[bau] parsed items={len(items)} job_id={job_id}", flush=True)
             xlsx_bytes = build_xlsx(items, article_map)
 
             with JOBS_LOCK:
                 j = JOBS.get(job_id)
                 if j:
+                    print(f"[bau] done job_id={job_id} xlsx_bytes={len(xlsx_bytes)}", flush=True)
                     j.status = "done"
                     j.data = xlsx_bytes
         except Exception as e:
             with JOBS_LOCK:
                 j = JOBS.get(job_id)
                 if j:
+                    print(f"[bau] error job_id={job_id}: {e}", flush=True)
                     j.status = "error"
                     j.error = str(e)
 
     threading.Thread(target=work, daemon=True).start()
     return JSONResponse({"job_id": job_id})
+
+
+
+@app.post("/extract")
+async def extract(file: UploadFile = File(...)):
+    """Backward-compatible endpoint: behaves like /extract_async and returns {job_id}."""
+    return await extract_async(file)
 
 
 @app.get("/job/{job_id}")
