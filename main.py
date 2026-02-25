@@ -21,14 +21,14 @@ except Exception:
 
 app = FastAPI(
     title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
-    version="1.0.0",
+    version="1.0.1",
 )
 
-# Static files (logo, etc.)
+# Static files (logo etc.)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # -------------------------
-# Regex / helpers (из рабочего main (1).py + расширение под площадь)
+# Regex / helpers
 # -------------------------
 RX_SIZE = re.compile(r"\b\d{2,}[xх×]\d{2,}(?:[xх×]\d{1,})?\b", re.IGNORECASE)
 RX_MM = re.compile(r"мм", re.IGNORECASE)
@@ -81,13 +81,17 @@ def strip_dims_anywhere(name: str) -> str:
 
 # -------------------------
 # Артикулы (Art1.xlsx) — кастомные для Бауцентра
+# ENV:
+#   ART_XLSX_PATH=/path/Art1.xlsx
+#   ART_VALUE_COLUMN=BAU  (или "Артикул")
 # -------------------------
 def load_article_map() -> Tuple[Dict[str, str], str]:
     if openpyxl is None:
         return {}, "openpyxl_not_installed"
 
-    # По умолчанию Art1.xlsx (как ты написал)
     path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
+    art_value_col_name = normalize_space(os.getenv("ART_VALUE_COLUMN", "Артикул"))
+
     if not os.path.exists(path):
         return {}, f"file_not_found:{path}"
 
@@ -97,19 +101,37 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
     except Exception as e:
         return {}, f"cannot_open:{e}"
 
+    # header row
     header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
-    товар_col = 1
-    арт_col = 2
+
+    # find columns
+    товар_col = None
+    art_col = None
+
     for idx, h in enumerate(header, start=1):
         if h.lower() == "товар":
             товар_col = idx
-        if h.lower() == "артикул":
-            арт_col = idx
+        if art_value_col_name and h.lower() == art_value_col_name.lower():
+            art_col = idx
+
+    # fallbacks
+    if товар_col is None:
+        товар_col = 1
+
+    if art_col is None:
+        for idx, h in enumerate(header, start=1):
+            if h.lower() == "артикул":
+                art_col = idx
+                break
+
+    if art_col is None:
+        # last fallback: 2nd column if exists else 1st
+        art_col = 2 if ws.max_column >= 2 else 1
 
     m: Dict[str, str] = {}
     for r in range(2, ws.max_row + 1):
         товар = ws.cell(r, товар_col).value
-        арт = ws.cell(r, арт_col).value
+        арт = ws.cell(r, art_col).value
         if not товар or not арт:
             continue
         товар_s = normalize_space(str(товар))
@@ -124,7 +146,7 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
 ARTICLE_MAP, ARTICLE_MAP_STATUS = load_article_map()
 
 # -------------------------
-# Счетчик конвертаций (простое файловое хранилище)
+# Счетчик конвертаций
 # -------------------------
 from threading import Lock
 
@@ -248,7 +270,7 @@ def _get_job_result(job_id: str) -> Optional[bytes]:
 INSTRUCTION_VIDEO_PATH = os.getenv("INSTRUCTION_VIDEO_PATH", "instruction.mp4")
 
 # -------------------------
-# PDF parsing helpers (из рабочего main (1).py)
+# PDF parsing helpers
 # -------------------------
 def is_noise(line: str) -> bool:
     low = (line or "").strip().lower()
@@ -346,12 +368,6 @@ def _to_float(s: str) -> float:
 
 
 def extract_area_from_context(lines: List[str]) -> float:
-    """
-    Пытаемся вытащить площадь из набора строк вокруг позиции.
-    Поддержка вариантов:
-      - "1.23 м2", "1,23 м²", "1.23 кв. м"
-      - "Площадь 1.23" / "Площадь:" + следующая строка "1.23"
-    """
     # 1) явные единицы
     for ln in lines:
         m = RX_AREA.search(ln)
@@ -362,11 +378,9 @@ def extract_area_from_context(lines: List[str]) -> float:
     for idx, ln in enumerate(lines):
         low = ln.lower()
         if "площад" in low:
-            # число в той же строке
             mm = re.search(r"(\d+(?:[.,]\d+)?)", ln)
             if mm:
                 return _to_float(mm.group(1))
-            # число в следующей строке
             if idx + 1 < len(lines) and RX_FLOAT_ONLY.fullmatch(lines[idx + 1]):
                 return _to_float(lines[idx + 1])
 
@@ -374,13 +388,12 @@ def extract_area_from_context(lines: List[str]) -> float:
 
 
 # -------------------------
-# Main parser: собираем name -> (qty_sum, area_sum)
+# Main parser: name -> (qty_sum, area_sum)
 # -------------------------
 def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = doc.page_count
 
-    # name -> {"qty": int, "area": float}
     ordered: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
     buf: List[str] = []
 
@@ -400,7 +413,6 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
         stats["processed_pages"] += 1
 
         txt = page.get_text("text") or ""
-        # сохраняем старую фильтрацию — в большинстве твоих PDF "якорь" через ₽
         if "₽" not in txt:
             continue
 
@@ -435,7 +447,6 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
-                # площадь пробуем искать в буфере + текущей строке + пары следующих строк
                 ctx = (buf + [line] + lines[i + 1 : i + 4]) if buf else ([line] + lines[i + 1 : i + 4])
                 area = extract_area_from_context(ctx)
                 buf.clear()
@@ -511,7 +522,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
                     continue
 
                 name = clean_name_from_buffer(buf)
-                ctx = (buf + lines[i : sum_idx + 3])  # чуть шире окно
+                ctx = (buf + lines[i : sum_idx + 3])
                 area = extract_area_from_context(ctx)
                 buf.clear()
 
@@ -552,10 +563,12 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
-        # ПЛОЩАДЬ пишем числом (float). Если не нашли — будет 0.
-        ws.append([art, int(qty or 0), float(area or 0.0)])
 
-    # небольшая косметика
+        # ПЛОЩАДЬ: если 0 — пусто (None => пустая ячейка)
+        area_cell = float(area) if area and float(area) > 0 else None
+
+        ws.append([art, int(qty or 0), area_cell])
+
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 14
@@ -565,7 +578,6 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
     for cell in ws["C"][1:]:
         cell.number_format = "0.00"
 
-    # закрепить шапку
     ws.freeze_panes = "A2"
 
     bio = io.BytesIO()
@@ -574,7 +586,7 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
 
 # -------------------------
-# UI (простая страница, без скролла)
+# UI (симпатичнее)
 # -------------------------
 HOME_HTML = """<!doctype html>
 <html lang="ru">
@@ -583,217 +595,339 @@ HOME_HTML = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Бауцентр • PDF → XLSX</title>
   <style>
-    :root { --bg:#0b0f17; --card:#121a2a; --text:#e9eefc; --muted:#a8b3d6; --border:rgba(255,255,255,.08); --btn:#ffd33d; }
-    html, body { height: 100%; overflow: hidden; }
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
+    :root{
+      --bg1:#0a1020;
+      --bg2:#0b0f17;
+      --card: rgba(255,255,255,.06);
+      --stroke: rgba(255,255,255,.12);
+      --text:#eef2ff;
+      --muted: rgba(238,242,255,.72);
+      --shadow: 0 30px 80px rgba(0,0,0,.45);
+      --accent:#ffd33d;
+      --ok:#5CFF9A;
+      --err:#ff6b7a;
+    }
+    html,body{height:100%; overflow:hidden;}
+    body{
       margin:0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      background: radial-gradient(1200px 600px at 20% 10%, #18234a 0%, var(--bg) 55%);
-      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:var(--text);
+      background:
+        radial-gradient(1000px 600px at 15% 10%, #1a2c66 0%, transparent 60%),
+        radial-gradient(900px 500px at 85% 15%, #4a2a1a 0%, transparent 55%),
+        linear-gradient(180deg, var(--bg1), var(--bg2));
     }
-    .hero {
-      position: fixed;
-      top: 18px;
-      left: 0;
-      width: 100%;
-      text-align: center;
-      z-index: 5;
-      pointer-events: none;
+
+    .topbar{
+      position:fixed;
+      inset: 18px 18px auto 18px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index:10;
+      pointer-events:none;
     }
-    .hero-logo { margin-top: 6px; height: 76px; width: auto; opacity: .98; }
-    .wrap {
-      height: 100vh;
+    .logo{
+      height:72px;
+      width:auto;
+      filter: drop-shadow(0 8px 22px rgba(0,0,0,.35));
+      opacity:.98;
+    }
+
+    .wrap{
+      height:100vh;
       display:flex;
       align-items:center;
       justify-content:center;
       padding: 28px;
-      padding-top: 150px;
+      padding-top: 140px;
     }
-    .card {
-      width:min(900px, 100%);
-      background: rgba(18,26,42,.92);
-      border: 1px solid var(--border);
-      border-radius: 18px;
+    .card{
+      width:min(920px, 100%);
+      border:1px solid var(--stroke);
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
+      border-radius: 22px;
+      box-shadow: var(--shadow);
       padding: 22px;
-      box-shadow: 0 18px 60px rgba(0,0,0,.45);
+      backdrop-filter: blur(10px);
     }
-    .top { display:flex; gap:14px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
-    h1 { margin:0; font-size: 28px; letter-spacing: .2px; }
-    .hint { margin: 8px 0 0; color: var(--muted); font-size: 14px; }
-    .badge { font-size: 12px; color: var(--muted); border: 1px solid var(--border); padding: 6px 10px; border-radius: 999px; }
-    .row {
-      margin-top: 18px;
+    .head{
+      display:flex;
+      gap:14px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+      margin-bottom: 14px;
+    }
+    h1{margin:0; font-size:28px; letter-spacing:.2px;}
+    .sub{margin-top:6px; color:var(--muted); font-size:14px; line-height:1.4;}
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--stroke);
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    .drop{
+      margin-top: 16px;
+      border: 1px dashed rgba(255,255,255,.22);
+      background: rgba(0,0,0,.12);
+      border-radius: 18px;
+      padding: 18px;
+      display:flex;
+      gap: 14px;
+      align-items:center;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .drop-left{
       display:flex;
       gap: 12px;
       align-items:center;
-      justify-content:center;
-      flex-wrap:wrap;
-      width: 100%;
+      flex: 1 1 420px;
     }
-    .file {
+    .icon{
+      width:44px;height:44px;
+      border-radius: 14px;
+      background: rgba(255,211,61,.15);
+      border: 1px solid rgba(255,211,61,.35);
       display:flex;
       align-items:center;
       justify-content:center;
+      font-weight:900;
+      color: var(--accent);
+      user-select:none;
+    }
+    .drop-title{font-weight:800;}
+    .drop-hint{color:var(--muted); font-size:13px; margin-top:4px;}
+
+    input[type=file]{display:none;}
+    .btn{
+      pointer-events:auto;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
       gap:10px;
-      padding: 10px 12px;
-      border: 1px dashed var(--border);
-      border-radius: 14px;
-      background: rgba(255,255,255,.02);
-    }
-    button {
       padding: 10px 14px;
-      border: 0;
+      border:0;
       border-radius: 14px;
-      cursor: pointer;
+      cursor:pointer;
       font-weight: 900;
-      background: var(--btn);
-      color: #1a1a1a;
+      background: var(--accent);
+      color:#1a1a1a;
+      box-shadow: 0 10px 26px rgba(255,211,61,.18);
+      transition: transform .08s ease;
     }
-    button:disabled { opacity: .55; cursor:not-allowed; }
-    .status { margin-top: 14px; font-size: 14px; color: var(--muted); white-space: pre-wrap; text-align:center; }
-    .status.ok { color: #79ffa8; }
-    .status.err { color: #ff7b8a; }
-    .corner { position: fixed; right: 12px; bottom: 10px; font-size: 12px; color: var(--muted); opacity: .9; }
+    .btn:active{transform: translateY(1px);}
+    .btn.secondary{
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      border: 1px solid var(--stroke);
+      box-shadow:none;
+    }
+    .btn:disabled{opacity:.55; cursor:not-allowed;}
+
+    .status{
+      margin-top: 14px;
+      font-size: 14px;
+      color: var(--muted);
+      text-align:center;
+      white-space:pre-wrap;
+      min-height: 22px;
+    }
+    .status.ok{color: var(--ok);}
+    .status.err{color: var(--err);}
+
+    .bar{
+      margin-top: 10px;
+      height: 10px;
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 999px;
+      overflow:hidden;
+    }
+    .bar > div{
+      height:100%;
+      width:0%;
+      background: rgba(255,211,61,.9);
+      transition: width .25s ease;
+    }
+
+    .corner{
+      position: fixed;
+      right: 14px;
+      bottom: 12px;
+      font-size: 12px;
+      color: var(--muted);
+      opacity:.9;
+    }
   </style>
 </head>
 <body>
-  <div class="hero">
-    <img class="hero-logo" src="/static/logo.png" alt="Бауцентр" />
+  <div class="topbar">
+    <img class="logo" src="/static/logo.png" alt="Бауцентр" />
   </div>
 
   <div class="wrap">
     <div class="card">
-      <div class="top">
+      <div class="head">
         <div>
-          <h1>PDF → XLSX</h1>
-          <div class="hint">Скачивание файла Excel: АРТИКУЛ / ШТ / ПЛОЩАДЬ</div>
+          <h1>Конвертация PDF → XLSX</h1>
+          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
         </div>
-        <div class="badge">XLSX • 3 колонки</div>
+        <div class="pill">bau.pdfcsv.ru</div>
       </div>
 
-      <div class="row">
-        <div class="file">
-          <input id="pdf" type="file" accept="application/pdf,.pdf" />
+      <div id="drop" class="drop">
+        <div class="drop-left">
+          <div class="icon">PDF</div>
+          <div>
+            <div class="drop-title" id="fname">Перетащи PDF сюда или выбери файл</div>
+            <div class="drop-hint">Поддерживается только *.pdf</div>
+          </div>
         </div>
-        <button id="btn" disabled>Скачать XLSX</button>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <label class="btn secondary" for="pdf">Выбрать PDF</label>
+          <button id="btn" class="btn" disabled>Скачать XLSX</button>
+        </div>
+
+        <input id="pdf" type="file" accept="application/pdf,.pdf" />
       </div>
 
+      <div class="bar" aria-hidden="true"><div id="bar"></div></div>
       <div id="status" class="status"></div>
     </div>
   </div>
 
   <div class="corner" id="counter">…</div>
 
-  <script>
-    const input = document.getElementById('pdf');
-    const btn = document.getElementById('btn');
-    const statusEl = document.getElementById('status');
+<script>
+  const input = document.getElementById('pdf');
+  const btn = document.getElementById('btn');
+  const statusEl = document.getElementById('status');
+  const fnameEl = document.getElementById('fname');
+  const barEl = document.getElementById('bar');
+  const drop = document.getElementById('drop');
 
-    function ok(msg){ statusEl.className='status ok'; statusEl.textContent=msg; }
-    function err(msg){ statusEl.className='status err'; statusEl.textContent=msg; }
-    function neutral(msg){ statusEl.className='status'; statusEl.textContent=msg||''; }
+  function ok(msg){ statusEl.className='status ok'; statusEl.textContent=msg; }
+  function err(msg){ statusEl.className='status err'; statusEl.textContent=msg; }
+  function neutral(msg){ statusEl.className='status'; statusEl.textContent=msg||''; }
+  function setBar(p){ barEl.style.width = Math.max(0, Math.min(100, p)) + '%'; }
 
-    async function loadCounter(){
-      try {
-        const r = await fetch('/stats');
-        if (!r.ok) return;
-        const j = await r.json();
-        if (typeof j.conversions === 'number') {
-          document.getElementById('counter').textContent = String(j.conversions);
-        }
-      } catch(e) {}
-    }
-    loadCounter();
-
-    input.addEventListener('change', () => {
-      const f = input.files && input.files[0];
-      btn.disabled = !f;
-      neutral(f ? ('Выбран файл: ' + f.name) : '');
-    });
-
-    btn.addEventListener('click', async () => {
-      const f = input.files && input.files[0];
-      if (!f) return;
-
-      btn.disabled = true;
-      const start = Date.now();
-
-      let timer = setInterval(() => {
-        const sec = Math.floor((Date.now() - start) / 1000);
-        neutral('Обработка… прошло ' + sec + ' сек');
-      }, 500);
-
-      try {
-        const fd = new FormData();
-        fd.append('file', f);
-
-        neutral('Загружаю PDF…');
-        const r = await fetch('/extract_async', { method: 'POST', body: fd });
-        if (!r.ok) {
-          let text = await r.text();
-          try { const j = JSON.parse(text); if (j.detail) text = String(j.detail); } catch(e) {}
-          throw new Error(text || ('HTTP ' + r.status));
-        }
-        const data = await r.json();
-        const job_id = data.job_id;
-
-        while (true) {
-          const s = await fetch('/job/' + job_id);
-          if (!s.ok) {
-            let text = await s.text();
-            try { const j = JSON.parse(text); if (j.detail) text = String(j.detail); } catch(e) {}
-            throw new Error(text || ('HTTP ' + s.status));
-          }
-          const j = await s.json();
-
-          const sec = Math.floor((Date.now() - start) / 1000);
-          let msg = (j.message || 'Обработка…') + ' • ' + sec + ' сек';
-
-          if (j.total_pages && j.processed_pages) {
-            msg += ' • страниц: ' + j.processed_pages + '/' + j.total_pages;
-          }
-          neutral(msg);
-
-          if (j.status === 'done') {
-            const dl = await fetch('/job/' + job_id + '/download');
-            if (!dl.ok) {
-              let text = await dl.text();
-              try { const jj = JSON.parse(text); if (jj.detail) text = String(jj.detail); } catch(e) {}
-              throw new Error(text || ('HTTP ' + dl.status));
-            }
-            const blob = await dl.blob();
-
-            const filename = (j.filename || ((f.name || 'items.pdf').replace(/\\.pdf$/i, '') + '.xlsx'));
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(url);
-
-            ok('Готово! Файл скачан: ' + filename);
-            loadCounter();
-            break;
-          }
-
-          if (j.status === 'error') {
-            throw new Error(j.message || 'Ошибка обработки');
-          }
-
-          await new Promise(res => setTimeout(res, 600));
-        }
-
-      } catch (e) {
-        err('Ошибка: ' + String(e.message || e));
-      } finally {
-        clearInterval(timer);
-        btn.disabled = !(input.files && input.files[0]);
+  async function loadCounter(){
+    try {
+      const r = await fetch('/stats');
+      if (!r.ok) return;
+      const j = await r.json();
+      if (typeof j.conversions === 'number') {
+        document.getElementById('counter').textContent = String(j.conversions);
       }
-    });
-  </script>
+    } catch(e) {}
+  }
+  loadCounter();
+
+  function setFile(f){
+    if (!f) {
+      btn.disabled = true;
+      fnameEl.textContent = 'Перетащи PDF сюда или выбери файл';
+      setBar(0);
+      neutral('');
+      return;
+    }
+    btn.disabled = false;
+    fnameEl.textContent = 'Выбран файл: ' + f.name;
+    setBar(0);
+    neutral('Готов к конвертации');
+  }
+
+  input.addEventListener('change', () => setFile(input.files && input.files[0]));
+
+  ;['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    drop.style.borderColor = 'rgba(255,211,61,.55)';
+  }));
+  ;['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); e.stopPropagation();
+    drop.style.borderColor = 'rgba(255,255,255,.22)';
+  }));
+  drop.addEventListener('drop', e => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) {
+      input.files = e.dataTransfer.files;
+      setFile(f);
+    }
+  });
+
+  btn.addEventListener('click', async () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+
+    btn.disabled = true;
+    setBar(10);
+    const start = Date.now();
+
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+
+      neutral('Загружаю PDF…');
+      const r = await fetch('/extract_async', { method: 'POST', body: fd });
+      if (!r.ok) throw new Error(await r.text());
+
+      const data = await r.json();
+      const job_id = data.job_id;
+
+      while (true) {
+        const s = await fetch('/job/' + job_id);
+        if (!s.ok) throw new Error(await s.text());
+        const j = await s.json();
+
+        const sec = Math.floor((Date.now() - start) / 1000);
+        let msg = (j.message || 'Обработка…') + ' • ' + sec + ' сек';
+        if (j.total_pages && j.processed_pages) {
+          msg += ' • страниц: ' + j.processed_pages + '/' + j.total_pages;
+          setBar(10 + (j.processed_pages / j.total_pages) * 70);
+        }
+
+        neutral(msg);
+
+        if (j.status === 'done') {
+          setBar(92);
+          const dl = await fetch('/job/' + job_id + '/download');
+          if (!dl.ok) throw new Error(await dl.text());
+          const blob = await dl.blob();
+
+          const filename = (j.filename || ((f.name || 'items.pdf').replace(/\\.pdf$/i, '') + '.xlsx'));
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+
+          setBar(100);
+          ok('Готово! XLSX скачан: ' + filename);
+          loadCounter();
+          break;
+        }
+
+        if (j.status === 'error') throw new Error(j.message || 'Ошибка обработки');
+        await new Promise(res => setTimeout(res, 600));
+      }
+
+    } catch (e) {
+      setBar(0);
+      err('Ошибка: ' + String(e.message || e));
+    } finally {
+      btn.disabled = !(input.files && input.files[0]);
+    }
+  });
+</script>
 </body>
 </html>
 """
@@ -819,6 +953,8 @@ def health():
         "status": "ok",
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
+        "art_value_column": os.getenv("ART_VALUE_COLUMN", ""),
+        "art_xlsx_path": os.getenv("ART_XLSX_PATH", ""),
         "conversions": get_counter(),
         "job_dir": JOB_DIR,
         "job_files": job_files,
@@ -840,7 +976,7 @@ def instruction_video():
 
 @app.post("/extract")
 async def extract(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
+    if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Загрузите PDF файл (.pdf).")
 
     if openpyxl is None:
@@ -854,10 +990,7 @@ async def extract(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Не удалось распарсить PDF: {e}")
 
     if not rows:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Не удалось найти позиции. debug={stats_}",
-        )
+        raise HTTPException(status_code=422, detail=f"Не удалось найти позиции. debug={stats_}")
 
     xlsx_bytes = make_xlsx(rows)
     increment_counter()
@@ -870,7 +1003,7 @@ async def extract(file: UploadFile = File(...)):
 
 @app.post("/extract_async")
 async def extract_async(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".pdf"):
+    if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Загрузите PDF файл (.pdf).")
 
     if openpyxl is None:
@@ -910,12 +1043,7 @@ async def extract_async(file: UploadFile = File(...)):
             _set_job_result(job_id, xlsx_bytes)
             increment_counter()
 
-            _set_job(
-                job_id,
-                status="done",
-                message="Готово",
-                stats=st,
-            )
+            _set_job(job_id, status="done", message="Готово", stats=st)
         except Exception as e:
             _set_job(job_id, status="error", message=f"Ошибка: {e}")
 
