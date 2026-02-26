@@ -21,7 +21,7 @@ except Exception:
 
 app = FastAPI(
     title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
-    version="1.0.3",
+    version="1.0.2",
 )
 
 # Static files (logo etc.)
@@ -364,11 +364,13 @@ def _to_float(s: str) -> float:
 
 
 def extract_area_from_context(lines: List[str]) -> float:
+    # 1) явные единицы
     for ln in lines:
         m = RX_AREA.search(ln)
         if m:
             return _to_float(m.group("val"))
 
+    # 2) по слову "площадь"
     for idx, ln in enumerate(lines):
         low = ln.lower()
         if "площад" in low:
@@ -437,6 +439,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
                 i += 1
                 continue
 
+            # A) INLINE anchor: "... price ₽ qty sum ₽"
             m = RX_PRICE_QTY_SUM.search(line)
             if m:
                 name = clean_name_from_buffer(buf)
@@ -461,6 +464,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
                 i += 1
                 continue
 
+            # C) EMBEDDED price anchor: line contains ₽, next line qty, next line sum ₽
             if RX_ANY_RUB.search(line):
                 if i + 2 < len(lines) and RX_INT.fullmatch(lines[i + 1]) and RX_MONEY_LINE.fullmatch(lines[i + 2]):
                     try:
@@ -485,6 +489,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
                     i += 3
                     continue
 
+            # B) MULTILINE anchor: price ₽ -> qty -> sum ₽
             if RX_MONEY_LINE.fullmatch(line):
                 end = min(len(lines), i + 8)
 
@@ -556,12 +561,13 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
-        art_out = art if art else name
+        art_out = art if art else name  # fallback на наименование
 
-        area_cell = float(area) if area and float(area) > 0 else None
+        area_cell = float(area) if area and float(area) > 0 else None  # None => пусто в Excel
+
         ws.append([art_out, int(qty or 0), area_cell])
 
-    ws.column_dimensions["A"].width = 58
+    ws.column_dimensions["A"].width = 48
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 14
 
@@ -619,7 +625,7 @@ HOME_HTML = """<!doctype html>
       pointer-events:none;
     }
     .logo{
-      height:140px;
+      height:72px;
       width:auto;
       filter: drop-shadow(0 8px 22px rgba(0,0,0,.35));
       opacity:.98;
@@ -631,7 +637,7 @@ HOME_HTML = """<!doctype html>
       align-items:center;
       justify-content:center;
       padding: 28px;
-      padding-top: 210px;
+      padding-top: 140px;
     }
     .card{
       width:min(920px, 100%);
@@ -652,6 +658,14 @@ HOME_HTML = """<!doctype html>
     }
     h1{margin:0; font-size:28px; letter-spacing:.2px;}
     .sub{margin-top:6px; color:var(--muted); font-size:14px; line-height:1.4;}
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--stroke);
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
 
     .drop{
       margin-top: 16px;
@@ -760,6 +774,7 @@ HOME_HTML = """<!doctype html>
           <h1>Конвертация PDF → XLSX</h1>
           <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
         </div>
+        <div class="pill">bau.pdfcsv.ru</div>
       </div>
 
       <div id="drop" class="drop">
@@ -855,7 +870,7 @@ HOME_HTML = """<!doctype html>
       const fd = new FormData();
       fd.append('file', f);
 
-      neutral('0 сек • Загружаю…');
+      neutral('Загружаю PDF…');
       const r = await fetch('/extract_async', { method: 'POST', body: fd });
       if (!r.ok) throw new Error(await r.text());
 
@@ -868,7 +883,7 @@ HOME_HTML = """<!doctype html>
         const j = await s.json();
 
         const sec = Math.floor((Date.now() - start) / 1000);
-        let msg = sec + ' сек • ' + (j.message || 'Обработка…');
+        let msg = (j.message || 'Обработка…') + ' • ' + sec + ' сек';
         if (j.total_pages && j.processed_pages) {
           msg += ' • страниц: ' + j.processed_pages + '/' + j.total_pages;
           setBar(10 + (j.processed_pages / j.total_pages) * 70);
