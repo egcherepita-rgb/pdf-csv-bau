@@ -21,7 +21,7 @@ except Exception:
 
 app = FastAPI(
     title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
-    version="1.0.1",
+    version="1.0.2",
 )
 
 # Static files (logo etc.)
@@ -101,10 +101,8 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
     except Exception as e:
         return {}, f"cannot_open:{e}"
 
-    # header row
     header = [normalize_space(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
 
-    # find columns
     товар_col = None
     art_col = None
 
@@ -114,7 +112,6 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
         if art_value_col_name and h.lower() == art_value_col_name.lower():
             art_col = idx
 
-    # fallbacks
     if товар_col is None:
         товар_col = 1
 
@@ -125,7 +122,6 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
                 break
 
     if art_col is None:
-        # last fallback: 2nd column if exists else 1st
         art_col = 2 if ws.max_column >= 2 else 1
 
     m: Dict[str, str] = {}
@@ -550,6 +546,8 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
 
 # -------------------------
 # XLSX output (АРТИКУЛ / ШТ / ПЛОЩАДЬ)
+# - если артикула нет в Art1.xlsx → пишем наименование товара
+# - если площадь = 0 → пустая ячейка
 # -------------------------
 def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
     if openpyxl is None:
@@ -563,13 +561,13 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
+        art_out = art if art else name  # fallback на наименование
 
-        # ПЛОЩАДЬ: если 0 — пусто (None => пустая ячейка)
-        area_cell = float(area) if area and float(area) > 0 else None
+        area_cell = float(area) if area and float(area) > 0 else None  # None => пусто в Excel
 
-        ws.append([art, int(qty or 0), area_cell])
+        ws.append([art_out, int(qty or 0), area_cell])
 
-    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["A"].width = 48
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 14
 
@@ -598,7 +596,6 @@ HOME_HTML = """<!doctype html>
     :root{
       --bg1:#0a1020;
       --bg2:#0b0f17;
-      --card: rgba(255,255,255,.06);
       --stroke: rgba(255,255,255,.12);
       --text:#eef2ff;
       --muted: rgba(238,242,255,.72);
@@ -775,7 +772,7 @@ HOME_HTML = """<!doctype html>
       <div class="head">
         <div>
           <h1>Конвертация PDF → XLSX</h1>
-          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
+          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
         </div>
         <div class="pill">bau.pdfcsv.ru</div>
       </div>
