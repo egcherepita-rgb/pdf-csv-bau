@@ -612,7 +612,7 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
-        art_out = art if art else name  # fallback на наименование
+        art_out = name if (not art or str(art).strip() == '0') else art  # fallback на наименование, если нет артикула или он = 0
 
         area_cell = float(area) if area and float(area) > 0 else None  # None => пусто в Excel
 
