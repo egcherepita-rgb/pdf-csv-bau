@@ -86,14 +86,34 @@ def strip_dims_anywhere(name: str) -> str:
 #   ART_VALUE_COLUMN=BAU  (или "Артикул")
 # -------------------------
 def load_article_map() -> Tuple[Dict[str, str], str]:
+    """Загружает соответствие 'Товар' -> 'Артикул' из Art1.xlsx.
+
+    Важно: в файле часто встречается Артикул = 0 — это валидное значение, его НЕ пропускаем.
+    Путь можно задать через ENV ART_XLSX_PATH. Если указан относительный путь, пробуем
+    также рядом с main.py и в текущей папке запуска.
+    """
     if openpyxl is None:
         return {}, "openpyxl_not_installed"
 
-    path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
+    env_path = os.getenv("ART_XLSX_PATH", "Art1.xlsx")
     art_value_col_name = normalize_space(os.getenv("ART_VALUE_COLUMN", "Артикул"))
 
-    if not os.path.exists(path):
-        return {}, f"file_not_found:{path}"
+    candidates = []
+    if env_path:
+        candidates.append(env_path)
+        if not os.path.isabs(env_path):
+            # рядом с файлом приложения
+            try:
+                here = os.path.dirname(os.path.abspath(__file__))
+                candidates.append(os.path.join(here, env_path))
+            except Exception:
+                pass
+            # текущая директория
+            candidates.append(os.path.join(os.getcwd(), env_path))
+
+    path = next((p for p in candidates if p and os.path.exists(p)), None)
+    if not path:
+        return {}, f"file_not_found:{env_path}"
 
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
@@ -124,16 +144,37 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
     if art_col is None:
         art_col = 2 if ws.max_column >= 2 else 1
 
+    def art_to_str(val: Any) -> str:
+        if val is None:
+            return ""
+        # числа из Excel могут быть float
+        if isinstance(val, (int,)):
+            return str(val)
+        if isinstance(val, float):
+            if abs(val - int(val)) < 1e-9:
+                return str(int(val))
+            return str(val).replace(",", ".")
+        s = normalize_space(str(val))
+        # если это "670000078.0" → "670000078"
+        if re.fullmatch(r"\d+\.0", s):
+            return s[:-2]
+        return s
+
     m: Dict[str, str] = {}
     for r in range(2, ws.max_row + 1):
         товар = ws.cell(r, товар_col).value
         арт = ws.cell(r, art_col).value
-        if not товар or not арт:
+
+        if товар is None:
             continue
+
         товар_s = normalize_space(str(товар))
-        арт_s = normalize_space(str(арт))
-        if not товар_s or not арт_s:
+        арт_s = art_to_str(арт)
+
+        # Артикул может быть "0" — это валидно. Пропускаем только если совсем пусто.
+        if not товар_s or арт_s == "":
             continue
+
         m[normalize_key(товар_s)] = арт_s
 
     return m, "ok"
@@ -282,6 +323,9 @@ def is_noise(line: str) -> bool:
         return True
     if "стоимость проекта" in low:
         return True
+    # Заголовок таблицы из PDF: "ID Фото Товар Габариты Вес Цена за шт Кол-во Сумма"
+    if low.startswith("id ") and "фото" in low and "товар" in low and "сумма" in low:
+        return True
     return False
 
 
@@ -319,8 +363,7 @@ def is_project_total_only(line: str, prev_line: str = "") -> bool:
 
 def is_header_token(line: str) -> bool:
     low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
-    return low in {"фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма", "площадь"}
-
+    return low in {"id", "фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма", "площадь"}
 
 def looks_like_dim_or_weight(line: str) -> bool:
     if RX_WEIGHT.search(line):
@@ -344,6 +387,14 @@ def clean_name_from_buffer(buf: List[str]) -> str:
         if is_noise(ln) or is_header_token(ln) or is_totals_block(ln):
             continue
         filtered.append(ln)
+
+    # Убираем строки, которые содержат только числовой ID (встречается как отдельная строка "0")
+    filtered = [ln for ln in filtered if not RX_INT.fullmatch(ln)]
+
+    # Если первая строка начинается с ID + пробел + текст, убираем этот ID:
+    # "670000078 Рельс несущий" -> "Рельс несущий"
+    if filtered:
+        filtered[0] = re.sub(r"^\d{3,}\s+", "", filtered[0]).strip()
 
     while filtered and (looks_like_dim_or_weight(filtered[-1]) or looks_like_money_or_qty(filtered[-1])):
         filtered.pop()
