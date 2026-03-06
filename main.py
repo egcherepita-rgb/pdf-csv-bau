@@ -453,7 +453,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
         "anchors_multiline": 0,
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
-        "parser": "id_segment_v2",
+        "parser": "id_segment_v3",
     }
 
     def flush_segment(seg_lines: List[str]) -> None:
@@ -564,7 +564,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
                 continue
 
             # Начало новой позиции по ID
-            if RX_INT.fullmatch(line) and len(line) >= 6:
+            if RX_INT.fullmatch(line) and (len(line) >= 6 or line == '0'):
                 in_table = True
                 if segment:
                     flush_segment(segment)
