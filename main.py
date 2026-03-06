@@ -434,193 +434,15 @@ def extract_area_from_context(lines: List[str]) -> float:
     return 0.0
 
 
-
-def cluster_words_to_lines(words: List[Tuple], y_tol: float = 2.0) -> List[Dict[str, Any]]:
-    """Группирует слова PyMuPDF в визуальные строки по координате Y."""
-    buckets: Dict[float, List[Tuple]] = {}
-    for w in words:
-        y_key = round(float(w[1]) / y_tol) * y_tol
-        buckets.setdefault(y_key, []).append(w)
-
-    lines: List[Dict[str, Any]] = []
-    for y_key in sorted(buckets.keys()):
-        ws = sorted(buckets[y_key], key=lambda x: float(x[0]))
-        avg_y = sum(float(x[1]) for x in ws) / max(len(ws), 1)
-        lines.append({
-            "y": avg_y,
-            "words": ws,
-            "text": " ".join(str(x[4]) for x in ws),
-        })
-    return lines
-
-
-def parse_items_by_layout(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
-    """
-    Новый основной парсер.
-    Опирается на координаты слов в PDF, поэтому устойчив к изменению ширины колонок,
-    в том числе если столбец ID стал шире и текстовый поток "плывёт".
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-    ordered: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    stats = {
-        "pages": doc.page_count,
-        "total_pages": doc.page_count,
-        "processed_pages": 0,
-        "items_found": 0,
-        "article_map_size": len(ARTICLE_MAP),
-        "article_map_status": ARTICLE_MAP_STATUS,
-        "parser": "layout_words",
-    }
-
-    cols: Optional[Dict[str, float]] = None
-
-    for page in doc:
-        stats["processed_pages"] += 1
-        words = page.get_text("words") or []
-        if not words:
-            continue
-
-        lines = cluster_words_to_lines(words)
-
-        header_line = None
-        for ln in lines:
-            low = normalize_space(ln["text"]).lower()
-            if ("id" in low) and ("товар" in low) and ("кол-во" in low):
-                cols = {}
-                for w in ln["words"]:
-                    t = normalize_space(str(w[4])).lower()
-                    if t == "id":
-                        cols["id"] = float(w[0])
-                    elif t.startswith("фото"):
-                        cols["photo"] = float(w[0])
-                    elif t == "товар":
-                        cols["name"] = float(w[0])
-                    elif t.startswith("габар"):
-                        cols["dims"] = float(w[0])
-                    elif t == "вес":
-                        cols["weight"] = float(w[0])
-                    elif t.startswith("кол-во"):
-                        cols["qty"] = float(w[0])
-                    elif t.startswith("сумма"):
-                        cols["sum"] = float(w[0])
-                header_line = ln
-                break
-
-        # На следующих страницах таблица может продолжаться уже без шапки.
-        if not cols:
-            continue
-
-        header_y = float(header_line["y"]) if header_line else 0.0
-
-        # Левая граница "наименования" — примерно середина между "Фото" и "Товар".
-        # Правая — чуть левее "Габариты", чтобы не захватывать размеры.
-        photo_x = cols.get("photo", cols.get("name", 210.0) - 80.0)
-        name_x = cols.get("name", 210.0)
-        dims_x = cols.get("dims", 300.0)
-        qty_x = cols.get("qty", 500.0)
-        sum_x = cols.get("sum", 530.0)
-
-        name_left = ((photo_x + name_x) / 2.0) - 5.0
-        name_right = dims_x - 15.0
-
-        totals_y = float("inf")
-        for ln in lines:
-            low = normalize_space(ln["text"]).lower()
-            if (
-                "общий вес" in low
-                or "максимальный габарит заказа" in low
-                or low.startswith("название компании")
-                or low.startswith("страница:")
-            ):
-                totals_y = min(totals_y, float(ln["y"]))
-
-        anchors: List[Dict[str, Any]] = []
-        for ln in lines:
-            y = float(ln["y"])
-            if y <= header_y + 5.0:
-                continue
-            if y >= totals_y:
-                break
-
-            id_words = [
-                w for w in ln["words"]
-                if float(w[0]) < name_left and RX_INT.fullmatch(normalize_space(str(w[4])))
-            ]
-            qty_words = [
-                w for w in ln["words"]
-                if (qty_x - 25.0) <= float(w[0]) <= (sum_x - 8.0)
-                and RX_INT.fullmatch(normalize_space(str(w[4])))
-            ]
-            has_dims = any(RX_SIZE.search(normalize_space(str(w[4]))) for w in ln["words"])
-            has_rub = "₽" in ln["text"]
-
-            if id_words and qty_words and has_dims and has_rub:
-                qty_word = min(qty_words, key=lambda w: abs(float(w[0]) - qty_x))
-                qty = int(normalize_space(str(qty_word[4])))
-                if 1 <= qty <= 500:
-                    anchors.append({"y": y, "qty": qty})
-
-        if not anchors:
-            continue
-
-        bounds = [header_y + 1.0]
-        for idx in range(len(anchors) - 1):
-            bounds.append((anchors[idx]["y"] + anchors[idx + 1]["y"]) / 2.0)
-        bounds.append(totals_y)
-
-        for idx, a in enumerate(anchors):
-            y_start = bounds[idx]
-            y_end = bounds[idx + 1]
-
-            name_parts: List[str] = []
-            ctx_lines: List[str] = []
-
-            for ln in lines:
-                y = float(ln["y"])
-                if not (y_start < y < y_end):
-                    continue
-
-                # Имя товара берём только из зоны колонки "Товар".
-                parts = [
-                    normalize_space(str(w[4]))
-                    for w in ln["words"]
-                    if name_left <= float(w[0]) < name_right
-                ]
-                if parts:
-                    text_part = normalize_space(" ".join(parts))
-                    name_parts.append(text_part)
-                    ctx_lines.append(text_part)
-
-                # Для площади на всякий случай собираем весь контекст в этом вертикальном диапазоне.
-                ctx_lines.append(normalize_space(ln["text"]))
-
-            name = clean_name_from_buffer(name_parts)
-            area = extract_area_from_context(ctx_lines)
-
-            if name:
-                if name not in ordered:
-                    ordered[name] = {"qty": 0, "area": 0.0}
-                ordered[name]["qty"] += int(a["qty"])
-                ordered[name]["area"] += float(area or 0.0)
-                stats["items_found"] += 1
-
-    rows: List[Tuple[str, int, float]] = []
-    for name, v in ordered.items():
-        rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
-
-    return rows, stats
-
-
 # -------------------------
 # Main parser: name -> (qty_sum, area_sum)
 # -------------------------
-def parse_items_legacy(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
+
+def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = doc.page_count
 
     ordered: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    buf: List[str] = []
 
     stats = {
         "pages": 0,
@@ -631,14 +453,97 @@ def parse_items_legacy(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], 
         "anchors_multiline": 0,
         "article_map_size": len(ARTICLE_MAP),
         "article_map_status": ARTICLE_MAP_STATUS,
+        "parser": "id_segment_v2",
     }
+
+    def flush_segment(seg_lines: List[str]) -> None:
+        if not seg_lines:
+            return
+
+        raw = [normalize_space(x) for x in seg_lines if normalize_space(x)]
+        if not raw:
+            return
+
+        # Первая строка сегмента почти всегда содержит ID
+        if not RX_INT.fullmatch(raw[0]):
+            return
+
+        work = raw[1:]
+
+        # Отрезаем служебный хвост, если он внезапно попал в сегмент
+        cut_idx = None
+        for idx, ln in enumerate(work):
+            if is_totals_block(ln) or is_noise(ln):
+                cut_idx = idx
+                break
+        if cut_idx is not None:
+            work = work[:cut_idx]
+
+        if not work:
+            return
+
+        qty = 0
+        anchor_kind = None
+
+        joined = " ".join(work)
+        m_inline = RX_PRICE_QTY_SUM.search(joined)
+        if m_inline:
+            try:
+                qty = int(m_inline.group("qty"))
+            except Exception:
+                qty = 0
+            anchor_kind = "inline"
+
+        if not (1 <= qty <= 500):
+            for i, ln in enumerate(work):
+                if RX_MONEY_LINE.fullmatch(ln):
+                    if i + 2 < len(work) and RX_INT.fullmatch(work[i + 1]) and RX_MONEY_LINE.fullmatch(work[i + 2]):
+                        try:
+                            qty = int(work[i + 1])
+                        except Exception:
+                            qty = 0
+                        anchor_kind = "multiline"
+                        break
+
+        if not (1 <= qty <= 500):
+            return
+
+        # Название = строки до первой строки с габаритами/весом/ценой
+        name_lines: List[str] = []
+        for ln in work:
+            if looks_like_dim_or_weight(ln) or RX_MONEY_LINE.fullmatch(ln):
+                break
+            if RX_INT.fullmatch(ln):
+                continue
+            if is_header_token(ln) or is_noise(ln) or is_totals_block(ln):
+                continue
+            name_lines.append(ln)
+
+        name = strip_dims_anywhere(normalize_space(" ".join(name_lines)))
+        name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
+
+        if not name:
+            return
+
+        area = extract_area_from_context(work)
+
+        if name not in ordered:
+            ordered[name] = {"qty": 0, "area": 0.0}
+        ordered[name]["qty"] += qty
+        ordered[name]["area"] += float(area or 0.0)
+        stats["items_found"] += 1
+        if anchor_kind == "inline":
+            stats["anchors_inline"] += 1
+        else:
+            stats["anchors_multiline"] += 1
 
     for page in doc:
         stats["pages"] += 1
         stats["processed_pages"] += 1
 
         txt = page.get_text("text") or ""
-        if "₽" not in txt:
+        if "₽" not in txt and "ID" not in txt and not re.search(r"\b\d{6,}\b", txt):
             continue
 
         lines = [normalize_space(x) for x in txt.splitlines()]
@@ -646,153 +551,49 @@ def parse_items_legacy(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], 
         if not lines:
             continue
 
-        in_totals = False
-        buf.clear()
+        segment: List[str] = []
+        in_table = False
 
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            prev = lines[i - 1] if i > 0 else ""
+        for idx, line in enumerate(lines):
+            prev = lines[idx - 1] if idx > 0 else ""
 
             if is_noise(line) or is_header_token(line):
-                i += 1
+                # Заголовок таблицы может быть без отдельной строки с "ID Фото..."
+                if "id" in line.lower() and "товар" in line.lower():
+                    in_table = True
                 continue
 
-            if is_project_total_only(line, prev_line=prev) or is_totals_block(line):
-                in_totals = True
-                buf.clear()
-                i += 1
+            # Начало новой позиции по ID
+            if RX_INT.fullmatch(line) and len(line) >= 6:
+                in_table = True
+                if segment:
+                    flush_segment(segment)
+                segment = [line]
                 continue
 
-            if in_totals:
-                i += 1
+            if not in_table:
                 continue
 
-            # A) INLINE anchor: "... price ₽ qty sum ₽"
-            m = RX_PRICE_QTY_SUM.search(line)
-            if m:
-                name = clean_name_from_buffer(buf)
-                ctx = (buf + [line] + lines[i + 1 : i + 4]) if buf else ([line] + lines[i + 1 : i + 4])
-                area = extract_area_from_context(ctx)
-                buf.clear()
-
-                if name:
-                    try:
-                        qty = int(m.group("qty"))
-                    except Exception:
-                        qty = 0
-
-                    if 1 <= qty <= 500:
-                        if name not in ordered:
-                            ordered[name] = {"qty": 0, "area": 0.0}
-                        ordered[name]["qty"] += qty
-                        ordered[name]["area"] += float(area or 0.0)
-                        stats["items_found"] += 1
-                        stats["anchors_inline"] += 1
-
-                i += 1
+            # После блока итогов позиции заканчиваются. Саму сумму проекта здесь не ловим,
+            # иначе можно ошибочно оборвать строку с большой суммой по позиции.
+            if is_totals_block(line):
+                if segment:
+                    flush_segment(segment)
+                    segment = []
+                in_table = False
                 continue
 
-            # C) EMBEDDED price anchor: line contains ₽, next line qty, next line sum ₽
-            if RX_ANY_RUB.search(line):
-                if i + 2 < len(lines) and RX_INT.fullmatch(lines[i + 1]) and RX_MONEY_LINE.fullmatch(lines[i + 2]):
-                    try:
-                        qty = int(lines[i + 1])
-                    except Exception:
-                        qty = 0
+            if segment:
+                segment.append(line)
 
-                    if 1 <= qty <= 500:
-                        name = clean_name_from_buffer(buf + [line])
-                        ctx = (buf + [line] + lines[i + 1 : i + 5])
-                        area = extract_area_from_context(ctx)
-                        buf.clear()
-
-                        if name:
-                            if name not in ordered:
-                                ordered[name] = {"qty": 0, "area": 0.0}
-                            ordered[name]["qty"] += qty
-                            ordered[name]["area"] += float(area or 0.0)
-                            stats["items_found"] += 1
-                            stats["anchors_multiline"] += 1
-
-                    i += 3
-                    continue
-
-            # B) MULTILINE anchor: price ₽ -> qty -> sum ₽
-            if RX_MONEY_LINE.fullmatch(line):
-                end = min(len(lines), i + 8)
-
-                qty_idx = None
-                for j in range(i + 1, end):
-                    if RX_INT.fullmatch(lines[j]):
-                        q = int(lines[j])
-                        if 1 <= q <= 500:
-                            qty_idx = j
-                            break
-
-                if qty_idx is None:
-                    buf.append(line)
-                    i += 1
-                    continue
-
-                sum_idx = None
-                for j in range(qty_idx + 1, end):
-                    if RX_MONEY_LINE.fullmatch(lines[j]):
-                        sum_idx = j
-                        break
-
-                if sum_idx is None:
-                    buf.append(line)
-                    i += 1
-                    continue
-
-                name = clean_name_from_buffer(buf)
-                ctx = (buf + lines[i : sum_idx + 3])
-                area = extract_area_from_context(ctx)
-                buf.clear()
-
-                if name:
-                    qty = int(lines[qty_idx])
-                    if name not in ordered:
-                        ordered[name] = {"qty": 0, "area": 0.0}
-                    ordered[name]["qty"] += qty
-                    ordered[name]["area"] += float(area or 0.0)
-                    stats["items_found"] += 1
-                    stats["anchors_multiline"] += 1
-
-                i = sum_idx + 1
-                continue
-
-            buf.append(line)
-            i += 1
+        if segment:
+            flush_segment(segment)
 
     out_rows: List[Tuple[str, int, float]] = []
     for name, v in ordered.items():
         out_rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
 
     return out_rows, stats
-
-
-
-def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
-    """
-    Сначала пробуем координатный парсер (устойчив к изменению ширины колонок в PDF).
-    Если он ничего не нашёл, откатываемся на старый текстовый парсер.
-    """
-    try:
-        rows, stats = parse_items_by_layout(pdf_bytes)
-        if rows:
-            return rows, stats
-    except Exception as e:
-        layout_error = str(e)
-    else:
-        layout_error = None
-
-    rows, stats = parse_items_legacy(pdf_bytes)
-    stats["fallback_used"] = True
-    if layout_error:
-        stats["layout_error"] = layout_error
-    return rows, stats
 
 
 # -------------------------
