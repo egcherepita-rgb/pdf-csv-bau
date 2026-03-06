@@ -434,10 +434,188 @@ def extract_area_from_context(lines: List[str]) -> float:
     return 0.0
 
 
+
+def cluster_words_to_lines(words: List[Tuple], y_tol: float = 2.0) -> List[Dict[str, Any]]:
+    """Группирует слова PyMuPDF в визуальные строки по координате Y."""
+    buckets: Dict[float, List[Tuple]] = {}
+    for w in words:
+        y_key = round(float(w[1]) / y_tol) * y_tol
+        buckets.setdefault(y_key, []).append(w)
+
+    lines: List[Dict[str, Any]] = []
+    for y_key in sorted(buckets.keys()):
+        ws = sorted(buckets[y_key], key=lambda x: float(x[0]))
+        avg_y = sum(float(x[1]) for x in ws) / max(len(ws), 1)
+        lines.append({
+            "y": avg_y,
+            "words": ws,
+            "text": " ".join(str(x[4]) for x in ws),
+        })
+    return lines
+
+
+def parse_items_by_layout(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
+    """
+    Новый основной парсер.
+    Опирается на координаты слов в PDF, поэтому устойчив к изменению ширины колонок,
+    в том числе если столбец ID стал шире и текстовый поток "плывёт".
+    """
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    ordered: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+    stats = {
+        "pages": doc.page_count,
+        "total_pages": doc.page_count,
+        "processed_pages": 0,
+        "items_found": 0,
+        "article_map_size": len(ARTICLE_MAP),
+        "article_map_status": ARTICLE_MAP_STATUS,
+        "parser": "layout_words",
+    }
+
+    cols: Optional[Dict[str, float]] = None
+
+    for page in doc:
+        stats["processed_pages"] += 1
+        words = page.get_text("words") or []
+        if not words:
+            continue
+
+        lines = cluster_words_to_lines(words)
+
+        header_line = None
+        for ln in lines:
+            low = normalize_space(ln["text"]).lower()
+            if ("id" in low) and ("товар" in low) and ("кол-во" in low):
+                cols = {}
+                for w in ln["words"]:
+                    t = normalize_space(str(w[4])).lower()
+                    if t == "id":
+                        cols["id"] = float(w[0])
+                    elif t.startswith("фото"):
+                        cols["photo"] = float(w[0])
+                    elif t == "товар":
+                        cols["name"] = float(w[0])
+                    elif t.startswith("габар"):
+                        cols["dims"] = float(w[0])
+                    elif t == "вес":
+                        cols["weight"] = float(w[0])
+                    elif t.startswith("кол-во"):
+                        cols["qty"] = float(w[0])
+                    elif t.startswith("сумма"):
+                        cols["sum"] = float(w[0])
+                header_line = ln
+                break
+
+        # На следующих страницах таблица может продолжаться уже без шапки.
+        if not cols:
+            continue
+
+        header_y = float(header_line["y"]) if header_line else 0.0
+
+        # Левая граница "наименования" — примерно середина между "Фото" и "Товар".
+        # Правая — чуть левее "Габариты", чтобы не захватывать размеры.
+        photo_x = cols.get("photo", cols.get("name", 210.0) - 80.0)
+        name_x = cols.get("name", 210.0)
+        dims_x = cols.get("dims", 300.0)
+        qty_x = cols.get("qty", 500.0)
+        sum_x = cols.get("sum", 530.0)
+
+        name_left = ((photo_x + name_x) / 2.0) - 5.0
+        name_right = dims_x - 15.0
+
+        totals_y = float("inf")
+        for ln in lines:
+            low = normalize_space(ln["text"]).lower()
+            if (
+                "общий вес" in low
+                or "максимальный габарит заказа" in low
+                or low.startswith("название компании")
+                or low.startswith("страница:")
+            ):
+                totals_y = min(totals_y, float(ln["y"]))
+
+        anchors: List[Dict[str, Any]] = []
+        for ln in lines:
+            y = float(ln["y"])
+            if y <= header_y + 5.0:
+                continue
+            if y >= totals_y:
+                break
+
+            id_words = [
+                w for w in ln["words"]
+                if float(w[0]) < name_left and RX_INT.fullmatch(normalize_space(str(w[4])))
+            ]
+            qty_words = [
+                w for w in ln["words"]
+                if (qty_x - 25.0) <= float(w[0]) <= (sum_x - 8.0)
+                and RX_INT.fullmatch(normalize_space(str(w[4])))
+            ]
+            has_dims = any(RX_SIZE.search(normalize_space(str(w[4]))) for w in ln["words"])
+            has_rub = "₽" in ln["text"]
+
+            if id_words and qty_words and has_dims and has_rub:
+                qty_word = min(qty_words, key=lambda w: abs(float(w[0]) - qty_x))
+                qty = int(normalize_space(str(qty_word[4])))
+                if 1 <= qty <= 500:
+                    anchors.append({"y": y, "qty": qty})
+
+        if not anchors:
+            continue
+
+        bounds = [header_y + 1.0]
+        for idx in range(len(anchors) - 1):
+            bounds.append((anchors[idx]["y"] + anchors[idx + 1]["y"]) / 2.0)
+        bounds.append(totals_y)
+
+        for idx, a in enumerate(anchors):
+            y_start = bounds[idx]
+            y_end = bounds[idx + 1]
+
+            name_parts: List[str] = []
+            ctx_lines: List[str] = []
+
+            for ln in lines:
+                y = float(ln["y"])
+                if not (y_start < y < y_end):
+                    continue
+
+                # Имя товара берём только из зоны колонки "Товар".
+                parts = [
+                    normalize_space(str(w[4]))
+                    for w in ln["words"]
+                    if name_left <= float(w[0]) < name_right
+                ]
+                if parts:
+                    text_part = normalize_space(" ".join(parts))
+                    name_parts.append(text_part)
+                    ctx_lines.append(text_part)
+
+                # Для площади на всякий случай собираем весь контекст в этом вертикальном диапазоне.
+                ctx_lines.append(normalize_space(ln["text"]))
+
+            name = clean_name_from_buffer(name_parts)
+            area = extract_area_from_context(ctx_lines)
+
+            if name:
+                if name not in ordered:
+                    ordered[name] = {"qty": 0, "area": 0.0}
+                ordered[name]["qty"] += int(a["qty"])
+                ordered[name]["area"] += float(area or 0.0)
+                stats["items_found"] += 1
+
+    rows: List[Tuple[str, int, float]] = []
+    for name, v in ordered.items():
+        rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
+
+    return rows, stats
+
+
 # -------------------------
 # Main parser: name -> (qty_sum, area_sum)
 # -------------------------
-def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
+def parse_items_legacy(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = doc.page_count
 
@@ -593,6 +771,28 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
         out_rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
 
     return out_rows, stats
+
+
+
+def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
+    """
+    Сначала пробуем координатный парсер (устойчив к изменению ширины колонок в PDF).
+    Если он ничего не нашёл, откатываемся на старый текстовый парсер.
+    """
+    try:
+        rows, stats = parse_items_by_layout(pdf_bytes)
+        if rows:
+            return rows, stats
+    except Exception as e:
+        layout_error = str(e)
+    else:
+        layout_error = None
+
+    rows, stats = parse_items_legacy(pdf_bytes)
+    stats["fallback_used"] = True
+    if layout_error:
+        stats["layout_error"] = layout_error
+    return rows, stats
 
 
 # -------------------------
