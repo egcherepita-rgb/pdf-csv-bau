@@ -21,7 +21,7 @@ except Exception:
 
 app = FastAPI(
     title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
-    version="1.1.0",
+    version="1.0.2",
 )
 
 # Static files (logo etc.)
@@ -30,7 +30,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # -------------------------
 # Regex / helpers
 # -------------------------
-RX_SIZE = re.compile(r"\b\d{1,4}[xх×]\d{1,4}(?:[xх×]\d{1,5})?\b", re.IGNORECASE)
+RX_SIZE = re.compile(r"\b\d{2,}[xх×]\d{2,}(?:[xх×]\d{1,})?\b", re.IGNORECASE)
 RX_MM = re.compile(r"мм", re.IGNORECASE)
 RX_WEIGHT = re.compile(r"\b\d+(?:[.,]\d+)?\s*кг\.?\b", re.IGNORECASE)
 
@@ -438,136 +438,7 @@ def extract_area_from_context(lines: List[str]) -> float:
 # Main parser: name -> (qty_sum, area_sum)
 # -------------------------
 
-
-
-def parse_items_no_id(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
-    """
-    Новый формат PDF: без отдельного столбца кастомного ID.
-    Типовая позиция:
-      [многострочное наименование]
-      [габариты]
-      [вес]
-      [цена]
-      [кол-во]
-      [сумма]
-    """
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = doc.page_count
-
-    ordered: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
-    stats = {
-        "pages": 0,
-        "total_pages": total_pages,
-        "processed_pages": 0,
-        "items_found": 0,
-        "article_map_size": len(ARTICLE_MAP),
-        "article_map_status": ARTICLE_MAP_STATUS,
-        "parser": "no_id_layout_v2",
-    }
-
-    all_lines: List[str] = []
-    table_started = False
-
-    for page in doc:
-        stats["pages"] += 1
-        stats["processed_pages"] += 1
-
-        txt = page.get_text("text") or ""
-        page_has_table = ("Товар" in txt and "Цена за шт" in txt and "Кол-во" in txt) or table_started
-        if not page_has_table:
-            continue
-
-        table_started = True
-        lines = [normalize_space(x) for x in txt.splitlines()]
-        lines = [x for x in lines if x]
-
-        for line in lines:
-            if is_totals_block(line):
-                break
-            if is_noise(line) or is_header_token(line):
-                continue
-            all_lines.append(line)
-
-    def add_item(name_lines: List[str], qty: int, area: float = 0.0) -> None:
-        name = strip_dims_anywhere(normalize_space(" ".join(name_lines)))
-        name = re.sub(r"^Фото\s*", "", name, flags=re.IGNORECASE).strip()
-        name = re.sub(r"^Товар\s*", "", name, flags=re.IGNORECASE).strip()
-        if not name or not (1 <= qty <= 500):
-            return
-        if name not in ordered:
-            ordered[name] = {"qty": 0, "area": 0.0}
-        ordered[name]["qty"] += qty
-        ordered[name]["area"] += float(area or 0.0)
-        stats["items_found"] += 1
-
-    i = 0
-    name_lines: List[str] = []
-
-    while i < len(all_lines):
-        line = all_lines[i]
-
-        if is_totals_block(line):
-            break
-
-        # Ищем строку габаритов — это якорь конца названия позиции
-        if RX_SIZE.search(line) and RX_MM.search(line) and name_lines:
-            k = i + 1
-
-            # вес обязателен почти всегда, но если его нет — просто не сдвигаем
-            if k < len(all_lines) and RX_WEIGHT.search(all_lines[k]):
-                k += 1
-
-            # цена
-            if not (k < len(all_lines) and RX_MONEY_LINE.fullmatch(all_lines[k])):
-                name_lines.append(line)
-                i += 1
-                continue
-            price_line = all_lines[k]
-            k += 1
-
-            # кол-во
-            if not (k < len(all_lines) and RX_INT.fullmatch(all_lines[k])):
-                name_lines.append(line)
-                i += 1
-                continue
-            qty = int(all_lines[k])
-            k += 1
-
-            # сумма
-            if not (k < len(all_lines) and RX_MONEY_LINE.fullmatch(all_lines[k])):
-                name_lines.append(line)
-                i += 1
-                continue
-            sum_line = all_lines[k]
-
-            # sanity-check: сумма ~= цена * qty
-            price_val = money_to_number(price_line)
-            sum_val = money_to_number(sum_line)
-            if price_val > 0 and qty > 0 and sum_val > 0:
-                if abs(price_val * qty - sum_val) > max(3, qty):
-                    name_lines.append(line)
-                    i += 1
-                    continue
-
-            add_item(name_lines, qty, 0.0)
-            name_lines = []
-            i = k + 1
-            continue
-
-        # строки до габаритов считаем названием
-        if not looks_like_dim_or_weight(line) and not RX_MONEY_LINE.fullmatch(line) and not RX_INT.fullmatch(line):
-            name_lines.append(line)
-
-        i += 1
-
-    out_rows: List[Tuple[str, int, float]] = []
-    for name, v in ordered.items():
-        out_rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
-
-    return out_rows, stats
-
-
-def parse_items_with_ids(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
+def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = doc.page_count
 
@@ -723,27 +594,6 @@ def parse_items_with_ids(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]]
         out_rows.append((name, int(v.get("qty") or 0), float(v.get("area") or 0.0)))
 
     return out_rows, stats
-
-
-
-
-def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
-    """
-    Универсальный парсер:
-    1) сначала пробуем старый формат PDF, где у позиции есть отдельный ID;
-    2) если позиции не найдены — пробуем новый формат без ID.
-    """
-    rows_old, stats_old = parse_items_with_ids(pdf_bytes)
-    if rows_old:
-        stats_old["fallback_used"] = False
-        stats_old["detected_layout"] = "with_ids"
-        return rows_old, stats_old
-
-    rows_new, stats_new = parse_items_no_id(pdf_bytes)
-    stats_new["fallback_used"] = True
-    stats_new["detected_layout"] = "no_ids"
-    stats_new["previous_parser_stats"] = stats_old
-    return rows_new, stats_new
 
 
 # -------------------------
