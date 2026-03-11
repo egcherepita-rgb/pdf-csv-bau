@@ -21,7 +21,7 @@ except Exception:
 
 app = FastAPI(
     title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
-    version="1.0.2",
+    version="1.0.3",
 )
 
 # Static files (logo etc.)
@@ -102,13 +102,11 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
     if env_path:
         candidates.append(env_path)
         if not os.path.isabs(env_path):
-            # рядом с файлом приложения
             try:
                 here = os.path.dirname(os.path.abspath(__file__))
                 candidates.append(os.path.join(here, env_path))
             except Exception:
                 pass
-            # текущая директория
             candidates.append(os.path.join(os.getcwd(), env_path))
 
     path = next((p for p in candidates if p and os.path.exists(p)), None)
@@ -147,7 +145,6 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
     def art_to_str(val: Any) -> str:
         if val is None:
             return ""
-        # числа из Excel могут быть float
         if isinstance(val, (int,)):
             return str(val)
         if isinstance(val, float):
@@ -155,7 +152,6 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
                 return str(int(val))
             return str(val).replace(",", ".")
         s = normalize_space(str(val))
-        # если это "670000078.0" → "670000078"
         if re.fullmatch(r"\d+\.0", s):
             return s[:-2]
         return s
@@ -171,7 +167,6 @@ def load_article_map() -> Tuple[Dict[str, str], str]:
         товар_s = normalize_space(str(товар))
         арт_s = art_to_str(арт)
 
-        # Артикул может быть "0" — это валидно. Пропускаем только если совсем пусто.
         if not товар_s or арт_s == "":
             continue
 
@@ -323,7 +318,6 @@ def is_noise(line: str) -> bool:
         return True
     if "стоимость проекта" in low:
         return True
-    # Заголовок таблицы из PDF: "ID Фото Товар Габариты Вес Цена за шт Кол-во Сумма"
     if low.startswith("id ") and "фото" in low and "товар" in low and "сумма" in low:
         return True
     return False
@@ -365,6 +359,7 @@ def is_header_token(line: str) -> bool:
     low = normalize_space(line).lower().replace("–", "-").replace("—", "-")
     return low in {"id", "фото", "товар", "габариты", "вес", "цена за шт", "кол-во", "сумма", "площадь"}
 
+
 def looks_like_dim_or_weight(line: str) -> bool:
     if RX_WEIGHT.search(line):
         return True
@@ -388,11 +383,8 @@ def clean_name_from_buffer(buf: List[str]) -> str:
             continue
         filtered.append(ln)
 
-    # Убираем строки, которые содержат только числовой ID (встречается как отдельная строка "0")
     filtered = [ln for ln in filtered if not RX_INT.fullmatch(ln)]
 
-    # Если первая строка начинается с ID + пробел + текст, убираем этот ID:
-    # "670000078 Рельс несущий" -> "Рельс несущий"
     if filtered:
         filtered[0] = re.sub(r"^\d{3,}\s+", "", filtered[0]).strip()
 
@@ -415,13 +407,11 @@ def _to_float(s: str) -> float:
 
 
 def extract_area_from_context(lines: List[str]) -> float:
-    # 1) явные единицы
     for ln in lines:
         m = RX_AREA.search(ln)
         if m:
             return _to_float(m.group("val"))
 
-    # 2) по слову "площадь"
     for idx, ln in enumerate(lines):
         low = ln.lower()
         if "площад" in low:
@@ -437,7 +427,6 @@ def extract_area_from_context(lines: List[str]) -> float:
 # -------------------------
 # Main parser: name -> (qty_sum, area_sum)
 # -------------------------
-
 def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[str, Any]]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     total_pages = doc.page_count
@@ -464,13 +453,11 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
         if not raw:
             return
 
-        # Первая строка сегмента почти всегда содержит ID
         if not RX_INT.fullmatch(raw[0]):
             return
 
         work = raw[1:]
 
-        # Отрезаем служебный хвост, если он внезапно попал в сегмент
         cut_idx = None
         for idx, ln in enumerate(work):
             if is_totals_block(ln) or is_noise(ln):
@@ -508,7 +495,6 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
         if not (1 <= qty <= 500):
             return
 
-        # Название = строки до первой строки с габаритами/весом/ценой
         name_lines: List[str] = []
         for ln in work:
             if looks_like_dim_or_weight(ln) or RX_MONEY_LINE.fullmatch(ln):
@@ -558,13 +544,11 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
             prev = lines[idx - 1] if idx > 0 else ""
 
             if is_noise(line) or is_header_token(line):
-                # Заголовок таблицы может быть без отдельной строки с "ID Фото..."
                 if "id" in line.lower() and "товар" in line.lower():
                     in_table = True
                 continue
 
-            # Начало новой позиции по ID
-            if RX_INT.fullmatch(line) and (len(line) >= 6 or line == '0'):
+            if RX_INT.fullmatch(line) and (len(line) >= 6 or line == "0"):
                 in_table = True
                 if segment:
                     flush_segment(segment)
@@ -574,8 +558,6 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
             if not in_table:
                 continue
 
-            # После блока итогов позиции заканчиваются. Саму сумму проекта здесь не ловим,
-            # иначе можно ошибочно оборвать строку с большой суммой по позиции.
             if is_totals_block(line):
                 if segment:
                     flush_segment(segment)
@@ -613,9 +595,8 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
-        art_out = name if (not art or str(art).strip() == '0') else art  # fallback на наименование, если нет артикула или он = 0
-
-        area_cell = float(area) if area and float(area) > 0 else None  # None => пусто в Excel
+        art_out = name if (not art or str(art).strip() == "0") else art
+        area_cell = float(area) if area and float(area) > 0 else None
 
         ws.append([art_out, int(qty or 0), area_cell])
 
@@ -636,7 +617,7 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
 
 
 # -------------------------
-# UI (симпатичнее)
+# UI
 # -------------------------
 HOME_HTML = """<!doctype html>
 <html lang="ru">
@@ -646,177 +627,432 @@ HOME_HTML = """<!doctype html>
   <title>Бауцентр • PDF → XLSX</title>
   <style>
     :root{
-      --bg1:#0a1020;
-      --bg2:#0b0f17;
+      --bg1:#08111f;
+      --bg2:#0b1324;
+      --bg3:#1a100d;
       --stroke: rgba(255,255,255,.12);
+      --stroke-soft: rgba(255,255,255,.08);
       --text:#eef2ff;
-      --muted: rgba(238,242,255,.72);
-      --shadow: 0 30px 80px rgba(0,0,0,.45);
+      --muted: rgba(238,242,255,.74);
+      --muted-2: rgba(238,242,255,.55);
+      --shadow: 0 30px 80px rgba(0,0,0,.48);
       --accent:#ffd33d;
+      --accent-dark:#1b1710;
       --ok:#5CFF9A;
       --err:#ff6b7a;
+      --card-bg: rgba(255,255,255,.06);
+      --card-bg-2: rgba(255,255,255,.03);
     }
-    html,body{height:100%; overflow:hidden;}
+
+    *{box-sizing:border-box;}
+    html,body{height:100%;}
     body{
       margin:0;
       font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
       color:var(--text);
       background:
-        radial-gradient(1000px 600px at 15% 10%, #1a2c66 0%, transparent 60%),
-        radial-gradient(900px 500px at 85% 15%, #4a2a1a 0%, transparent 55%),
-        linear-gradient(180deg, var(--bg1), var(--bg2));
+        radial-gradient(1000px 620px at 14% 10%, rgba(34,72,168,.45) 0%, transparent 58%),
+        radial-gradient(900px 560px at 84% 16%, rgba(132,72,34,.36) 0%, transparent 54%),
+        linear-gradient(180deg, var(--bg1), var(--bg2) 62%, var(--bg3));
+      min-height:100vh;
+      overflow-x:hidden;
+    }
+
+    body::before{
+      content:"";
+      position:fixed;
+      inset:0;
+      pointer-events:none;
+      background:
+        linear-gradient(rgba(255,255,255,.015), rgba(255,255,255,0)),
+        radial-gradient(circle at center, rgba(255,255,255,.04) 0, transparent 60%);
+      opacity:.6;
     }
 
     .topbar{
-      position:fixed;
-      inset: 18px 18px auto 18px;
+      position:relative;
+      z-index:2;
+      display:flex;
+      justify-content:center;
+      padding: 34px 20px 0;
+    }
+
+    .logo-shell{
       display:flex;
       align-items:center;
       justify-content:center;
-      z-index:10;
-      pointer-events:none;
+      width:min(440px, 92vw);
+      min-height:120px;
+      padding: 18px 28px;
+      border:1px solid rgba(255,255,255,.08);
+      border-radius: 26px;
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.025));
+      backdrop-filter: blur(10px);
+      box-shadow: 0 18px 45px rgba(0,0,0,.25);
     }
+
     .logo{
-      height:72px;
-      width:auto;
-      filter: drop-shadow(0 8px 22px rgba(0,0,0,.35));
-      opacity:.98;
+      display:block;
+      width:min(320px, 72vw);
+      height:auto;
+      filter: drop-shadow(0 12px 28px rgba(0,0,0,.35));
+      opacity: .99;
     }
 
     .wrap{
-      height:100vh;
+      min-height: calc(100vh - 170px);
       display:flex;
       align-items:center;
       justify-content:center;
-      padding: 28px;
-      padding-top: 140px;
+      padding: 28px 20px 44px;
     }
+
     .card{
-      width:min(920px, 100%);
+      position:relative;
+      z-index:2;
+      width:min(980px, 100%);
       border:1px solid var(--stroke);
-      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-      border-radius: 22px;
+      background: linear-gradient(180deg, var(--card-bg), var(--card-bg-2));
+      border-radius: 28px;
       box-shadow: var(--shadow);
-      padding: 22px;
-      backdrop-filter: blur(10px);
+      padding: 28px;
+      backdrop-filter: blur(14px);
     }
+
+    .card::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      border-radius:28px;
+      pointer-events:none;
+      background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,0));
+      opacity:.35;
+    }
+
     .head{
+      position:relative;
+      z-index:1;
       display:flex;
-      gap:14px;
+      gap:16px;
       align-items:flex-start;
       justify-content:space-between;
       flex-wrap:wrap;
-      margin-bottom: 14px;
+      margin-bottom: 18px;
     }
-    h1{margin:0; font-size:28px; letter-spacing:.2px;}
-    .sub{margin-top:6px; color:var(--muted); font-size:14px; line-height:1.4;}
+
+    h1{
+      margin:0;
+      font-size:34px;
+      line-height:1.08;
+      letter-spacing:.2px;
+      font-weight:900;
+    }
+
+    .sub{
+      margin-top:10px;
+      color:var(--muted);
+      font-size:15px;
+      line-height:1.55;
+      max-width: 760px;
+    }
+
     .pill{
       font-size:12px;
       color:var(--muted);
       border:1px solid var(--stroke);
-      padding:6px 10px;
+      padding:8px 12px;
       border-radius:999px;
       white-space:nowrap;
+      background: rgba(255,255,255,.04);
+      align-self:flex-start;
     }
 
     .drop{
-      margin-top: 16px;
-      border: 1px dashed rgba(255,255,255,.22);
-      background: rgba(0,0,0,.12);
-      border-radius: 18px;
-      padding: 18px;
+      position:relative;
+      z-index:1;
+      margin-top: 18px;
+      border: 1px dashed rgba(255,255,255,.20);
+      background: rgba(0,0,0,.14);
+      border-radius: 22px;
+      padding: 24px;
       display:flex;
-      gap: 14px;
+      gap: 16px;
       align-items:center;
       justify-content:space-between;
       flex-wrap:wrap;
+      transition: border-color .15s ease, background .15s ease, transform .15s ease;
     }
+
+    .drop:hover{
+      border-color: rgba(255,211,61,.34);
+      background: rgba(0,0,0,.18);
+    }
+
     .drop-left{
       display:flex;
-      gap: 12px;
+      gap: 16px;
       align-items:center;
-      flex: 1 1 420px;
+      flex: 1 1 460px;
+      min-width: 0;
     }
+
     .icon{
-      width:44px;height:44px;
-      border-radius: 14px;
-      background: rgba(255,211,61,.15);
-      border: 1px solid rgba(255,211,61,.35);
+      width:58px;
+      height:58px;
+      flex: 0 0 58px;
+      border-radius: 18px;
+      background: rgba(255,211,61,.14);
+      border: 1px solid rgba(255,211,61,.34);
       display:flex;
       align-items:center;
       justify-content:center;
       font-weight:900;
+      font-size: 15px;
       color: var(--accent);
       user-select:none;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
     }
-    .drop-title{font-weight:800;}
-    .drop-hint{color:var(--muted); font-size:13px; margin-top:4px;}
+
+    .drop-title{
+      font-weight:900;
+      font-size:18px;
+      line-height:1.2;
+      word-break:break-word;
+    }
+
+    .drop-hint{
+      color:var(--muted);
+      font-size:14px;
+      margin-top:6px;
+      line-height:1.45;
+    }
 
     input[type=file]{display:none;}
+
+    .actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+
     .btn{
       pointer-events:auto;
       display:inline-flex;
       align-items:center;
       justify-content:center;
       gap:10px;
-      padding: 10px 14px;
+      min-height:50px;
+      padding: 12px 18px;
       border:0;
-      border-radius: 14px;
+      border-radius: 16px;
       cursor:pointer;
       font-weight: 900;
+      font-size: 14px;
+      text-decoration:none;
       background: var(--accent);
       color:#1a1a1a;
-      box-shadow: 0 10px 26px rgba(255,211,61,.18);
-      transition: transform .08s ease;
+      box-shadow: 0 12px 28px rgba(255,211,61,.16);
+      transition: transform .08s ease, filter .15s ease, opacity .15s ease;
     }
+
+    .btn:hover{filter:brightness(1.03);}
     .btn:active{transform: translateY(1px);}
     .btn.secondary{
-      background: rgba(255,255,255,.08);
+      background: rgba(255,255,255,.07);
       color: var(--text);
       border: 1px solid var(--stroke);
       box-shadow:none;
     }
-    .btn:disabled{opacity:.55; cursor:not-allowed;}
+    .btn:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+      filter:none;
+    }
+
+    .meta-row{
+      position:relative;
+      z-index:1;
+      display:flex;
+      gap:14px;
+      flex-wrap:wrap;
+      margin-top: 16px;
+    }
+
+    .meta-box{
+      flex:1 1 220px;
+      min-width: 180px;
+      border:1px solid var(--stroke-soft);
+      background: rgba(255,255,255,.035);
+      border-radius:18px;
+      padding:14px 16px;
+    }
+
+    .meta-label{
+      font-size:12px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--muted-2);
+      margin-bottom:6px;
+    }
+
+    .meta-value{
+      font-size:14px;
+      line-height:1.45;
+      color:var(--text);
+    }
 
     .status{
-      margin-top: 14px;
+      position:relative;
+      z-index:1;
+      margin-top: 16px;
       font-size: 14px;
       color: var(--muted);
       text-align:center;
       white-space:pre-wrap;
       min-height: 22px;
     }
+
     .status.ok{color: var(--ok);}
     .status.err{color: var(--err);}
 
     .bar{
-      margin-top: 10px;
-      height: 10px;
+      position:relative;
+      z-index:1;
+      margin-top: 12px;
+      height: 12px;
       background: rgba(255,255,255,.08);
       border: 1px solid rgba(255,255,255,.10);
       border-radius: 999px;
       overflow:hidden;
     }
+
     .bar > div{
       height:100%;
       width:0%;
-      background: rgba(255,211,61,.9);
+      background: linear-gradient(90deg, rgba(255,211,61,.85), rgba(255,230,120,.95));
+      box-shadow: 0 0 18px rgba(255,211,61,.28);
       transition: width .25s ease;
     }
 
     .corner{
       position: fixed;
-      right: 14px;
-      bottom: 12px;
+      right: 16px;
+      bottom: 14px;
+      z-index: 3;
       font-size: 12px;
       color: var(--muted);
-      opacity:.9;
+      opacity:.92;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(0,0,0,.18);
+      border: 1px solid rgba(255,255,255,.08);
+      backdrop-filter: blur(6px);
+    }
+
+    @media (max-width: 900px){
+      .logo-shell{
+        width:min(360px, 92vw);
+        min-height:102px;
+        padding: 16px 22px;
+      }
+
+      .logo{
+        width:min(280px, 74vw);
+      }
+
+      .wrap{
+        min-height:auto;
+        padding-top: 22px;
+      }
+
+      .card{
+        padding:22px;
+      }
+
+      h1{
+        font-size:28px;
+      }
+    }
+
+    @media (max-width: 640px){
+      .topbar{
+        padding-top: 20px;
+      }
+
+      .logo-shell{
+        width:min(320px, 94vw);
+        min-height:88px;
+        border-radius: 22px;
+      }
+
+      .logo{
+        width:min(240px, 76vw);
+      }
+
+      .wrap{
+        padding: 20px 14px 28px;
+      }
+
+      .card{
+        border-radius:22px;
+        padding:18px;
+      }
+
+      h1{
+        font-size:24px;
+      }
+
+      .sub{
+        font-size:14px;
+      }
+
+      .drop{
+        padding:18px;
+        border-radius:18px;
+      }
+
+      .drop-left{
+        flex: 1 1 100%;
+        align-items:flex-start;
+      }
+
+      .icon{
+        width:50px;
+        height:50px;
+        flex-basis:50px;
+        border-radius:16px;
+      }
+
+      .drop-title{
+        font-size:16px;
+      }
+
+      .actions{
+        width:100%;
+        justify-content:stretch;
+      }
+
+      .actions .btn,
+      .actions label.btn{
+        width:100%;
+      }
+
+      .corner{
+        right: 10px;
+        bottom: 10px;
+        font-size:11px;
+        padding:7px 10px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="topbar">
-    <img class="logo" src="/static/logo.png" alt="Бауцентр" />
+    <div class="logo-shell">
+      <img class="logo" src="/static/logo.png" alt="Бауцентр" />
+    </div>
   </div>
 
   <div class="wrap">
@@ -824,7 +1060,11 @@ HOME_HTML = """<!doctype html>
       <div class="head">
         <div>
           <h1>Конвертация PDF → XLSX</h1>
-          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
+          <div class="sub">
+            Загрузите спецификацию из PDF и получите Excel с 3 колонками:
+            <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b>.
+            Если площадь не указана, ячейка в Excel останется пустой.
+          </div>
         </div>
         <div class="pill">bau.pdfcsv.ru</div>
       </div>
@@ -834,16 +1074,27 @@ HOME_HTML = """<!doctype html>
           <div class="icon">PDF</div>
           <div>
             <div class="drop-title" id="fname">Перетащи PDF сюда или выбери файл</div>
-            <div class="drop-hint">Поддерживается только *.pdf</div>
+            <div class="drop-hint">Поддерживается только формат .pdf</div>
           </div>
         </div>
 
-        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <div class="actions">
           <label class="btn secondary" for="pdf">Выбрать PDF</label>
           <button id="btn" class="btn" disabled>Скачать XLSX</button>
         </div>
 
         <input id="pdf" type="file" accept="application/pdf,.pdf" />
+      </div>
+
+      <div class="meta-row">
+        <div class="meta-box">
+          <div class="meta-label">Результат</div>
+          <div class="meta-value">Excel-файл для Бауцентра с колонками АРТИКУЛ, ШТ, ПЛОЩАДЬ</div>
+        </div>
+        <div class="meta-box">
+          <div class="meta-label">Подбор артикула</div>
+          <div class="meta-value">Если артикул не найден, в Excel будет подставлено наименование товара</div>
+        </div>
       </div>
 
       <div class="bar" aria-hidden="true"><div id="bar"></div></div>
@@ -894,14 +1145,18 @@ HOME_HTML = """<!doctype html>
 
   input.addEventListener('change', () => setFile(input.files && input.files[0]));
 
-  ;['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+  ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
     e.preventDefault(); e.stopPropagation();
     drop.style.borderColor = 'rgba(255,211,61,.55)';
+    drop.style.background = 'rgba(0,0,0,.20)';
   }));
-  ;['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
     e.preventDefault(); e.stopPropagation();
-    drop.style.borderColor = 'rgba(255,255,255,.22)';
+    drop.style.borderColor = 'rgba(255,255,255,.20)';
+    drop.style.background = 'rgba(0,0,0,.14)';
   }));
+
   drop.addEventListener('drop', e => {
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) {
