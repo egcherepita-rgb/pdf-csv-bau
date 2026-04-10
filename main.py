@@ -20,7 +20,7 @@ except Exception:
 
 
 app = FastAPI(
-    title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТ / ПЛОЩАДЬ)",
+    title="Бауцентр • PDF → XLSX (АРТИКУЛ / ШТУК / ПЛОЩАДЬ)",
     version="1.0.4",
 )
 
@@ -323,7 +323,7 @@ def is_noise(line: str) -> bool:
         return True
     if "стоимость проекта" in low:
         return True
-    # Заголовок таблицы из PDF: "ID Фото Товар Габариты Вес Цена за шт Кол-во Сумма"
+    # Заголовок таблицы из PDF: "ID Фото Товар Габариты Вес Цена за штук Кол-во Сумма"
     if low.startswith("id ") and "фото" in low and "товар" in low and "сумма" in low:
         return True
     return False
@@ -598,7 +598,7 @@ def parse_items(pdf_bytes: bytes) -> Tuple[List[Tuple[str, int, float]], Dict[st
 
 
 # -------------------------
-# XLSX output (АРТИКУЛ / ШТ / ПЛОЩАДЬ)
+# XLSX output (АРТИКУЛ / ШТУК / ПЛОЩАДЬ)
 # - если артикула нет в Art1.xlsx → пишем наименование товара
 # - если площадь = 0 → пустая ячейка
 # -------------------------
@@ -610,7 +610,7 @@ def make_xlsx(rows: List[Tuple[str, int, float]]) -> bytes:
     ws = wb.active
     ws.title = "BAU"
 
-    ws.append(["АРТИКУЛ", "ШТ", "ПЛОЩАДЬ"])
+    ws.append(["АРТИКУЛ", "ШТУК", "ПЛОЩАДЬ"])
 
     for name, qty, area in rows:
         art = ARTICLE_MAP.get(normalize_key(name), "")
@@ -917,7 +917,7 @@ HOME_HTML = """<!doctype html>
       <div class="head">
         <div>
           <h1>Конвертация PDF → XLSX</h1>
-          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТ</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
+          <div class="sub">На выходе Excel с 3 колонками: <b>АРТИКУЛ/НАИМЕНОВАНИЕ</b>, <b>ШТУК</b>, <b>ПЛОЩАДЬ</b> (пустая, если нет).</div>
         </div>
         <div class="pill">bau.pdfcsv.ru</div>
       </div>
